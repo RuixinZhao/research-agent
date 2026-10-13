@@ -225,3 +225,97 @@ def test_server_reproduction_solve_endpoint(isolated_repro_env):
     assert data["status"] == "completed"
     assert len(data["metrics"]) == 3
     assert len(data["figures"]) == 1
+
+
+# -------------------------------------------------------------
+# 4. Zero LLM Dependency & Concurrent Multi-task Execution Tests
+# -------------------------------------------------------------
+
+def test_reproduction_strictly_no_llm_dependency(isolated_repro_env, monkeypatch):
+    """
+    确保 D 类在任何情况下都不依赖外网大模型：
+    即使 LLM 网关配置完全错误，D 类仍然能够 100% 确定性离线完成。
+    """
+    monkeypatch.setattr(settings, "CHALLENGE_LLM_BASE_URL", "http://non-existent-gateway.invalid:9999/v1")
+    monkeypatch.setattr(settings, "CHALLENGE_LLM_API_KEY", "INVALID_KEY")
+    
+    handler = ReproductionHandler()
+    assert handler.llm is None, "ReproductionHandler must explicitly have self.llm = None"
+
+    task = ChallengeTaskInput(
+        case_id="D-01",
+        function="Reproduction",
+        title="D-01 纯离线执行",
+        input="测试无网络条件下的 D 类执行",
+        materials=[],
+        constraints=[],
+        expected_output="生成 submission.json 与图表",
+        output_schema_ref="Reproduction"
+    )
+
+    result = handler.handle(task, session_id="test-session")
+    assert result["status"] == "completed"
+    assert result["metrics"][0]["observed"] is not None
+    assert result["metrics"][0]["reference"] is None
+    assert result["metrics"][0]["relative_error"] is None
+
+
+def test_reproduction_concurrent_multi_tasks(isolated_repro_env):
+    """
+    测试 D-01 到 D-05 在多线程并发执行环境下的鲁棒性：
+    防止多任务并发引起的文件读写交叉污染、竞争冒险或产物混淆。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    output_dir, team = isolated_repro_env
+
+    cases = ["D-01", "D-02", "D-03", "D-04", "D-05"]
+
+    def run_case(cid):
+        h = ReproductionHandler()
+        t = ChallengeTaskInput(
+            case_id=cid,
+            function="Reproduction",
+            title=f"并发小实验 {cid}",
+            input=f"运行 {cid} 离线实验流水线",
+            materials=[],
+            constraints=[],
+            expected_output="生成 submission.json 与真实图表",
+            output_schema_ref="Reproduction"
+        )
+        return cid, h.handle(t, session_id=f"sess-{cid}")
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(run_case, cid): cid for cid in cases}
+        for f in as_completed(futures):
+            cid, res = f.result()
+            results[cid] = res
+
+    # 验证全部 5 道题并发执行结果
+    for cid in cases:
+        assert cid in results
+        res = results[cid]
+        assert res["case_id"] == cid
+        assert res["status"] == "completed"
+
+        # 验证指标与空值
+        for m in res["metrics"]:
+            assert m["observed"] is not None and isinstance(m["observed"], (int, float))
+            assert m["reference"] is None
+            assert m["relative_error"] is None
+
+        # 验证图表与魔数签名
+        fig = res["figures"][0]
+        fig_path = output_dir / fig["path"]
+        assert fig_path.is_file()
+        with open(fig_path, "rb") as f_img:
+            assert f_img.read(8) == b"\x89PNG\r\n\x1a\n"
+
+        # 验证磁盘落盘隔离性
+        disk_json = output_dir / "data" / team / f"{cid}.json"
+        assert disk_json.is_file()
+        with open(disk_json, "r", encoding="utf-8") as f_json:
+            disk_data = json.load(f_json)
+        assert disk_data["case_id"] == cid
+        assert disk_data["status"] == "completed"
+

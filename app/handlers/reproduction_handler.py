@@ -45,6 +45,12 @@ class ReproductionHandler(BaseHandler):
 
     PNG_MAGIC_BYTES = b"\x89PNG\r\n\x1a\n"
 
+    def __init__(self):
+        super().__init__()
+        # D 类复现任务属于 100% 确定性的离线代码执行与图表提取，
+        # 坚决不依赖外部 LLM Gateway，彻底杜绝外网网络抖动或 Gateway 限流对 40 分基底的影响。
+        self.llm = None
+
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
         case_id = task.case_id.strip()
         logger.info(f"ReproductionHandler: Starting reproduction task for {case_id}")
@@ -144,11 +150,11 @@ class ReproductionHandler(BaseHandler):
             return self._fallback(case_id, status="failed")
 
     def _locate_and_parse_submission(self, case_id: str, work_dir: str, stdout_text: str) -> Optional[Dict[str, Any]]:
-        """从候选位置检索并解析 submission.json"""
+        """从候选位置检索并解析 submission.json，确保 case_id 严格一致以支持并发多任务"""
         candidate_paths = [
             os.path.join(work_dir, "submission.json"),
-            os.path.join(self.file_writer.root, "submission.json"),
             os.path.join(self.file_writer.root, f"data/{self.team_name}/{case_id}.json"),
+            os.path.join(self.file_writer.root, "submission.json"),
             os.path.join(f"/tmp/repro_{case_id}", "submission.json")
         ]
 
@@ -158,6 +164,9 @@ class ReproductionHandler(BaseHandler):
                     with open(p, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     if isinstance(data, dict) and data.get("status") == "completed":
+                        # 确保提取的数据归属于当前 case_id，防止多用例并发时读取交叉遗留产物
+                        if data.get("case_id") and data.get("case_id") != case_id:
+                            continue
                         return data
                 except Exception as e:
                     logger.debug(f"Failed to read submission from {p}: {e}")
@@ -170,6 +179,8 @@ class ReproductionHandler(BaseHandler):
                     try:
                         data = json.loads(line)
                         if isinstance(data, dict) and "metrics" in data and "figures" in data:
+                            if data.get("case_id") and data.get("case_id") != case_id:
+                                continue
                             return data
                     except Exception:
                         pass
