@@ -48,8 +48,10 @@ async def solve(request: Request):
     
     try:
         handler = get_handler(task.function)
-        result_dict = handler.handle(task, session_id=session_id)
-        return JSONResponse(content=result_dict)
+        from app.core.circuit_breaker import TaskTimeoutGuard
+        with TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=settings.TASK_TIMEOUT_SECONDS):
+            result_dict = handler.handle(task, session_id=session_id)
+            return JSONResponse(content=result_dict)
     except Exception as e:
         # 异常兜底防护
         return JSONResponse(
