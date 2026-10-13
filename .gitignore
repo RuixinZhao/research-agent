@@ -28,3 +28,4 @@ downloaded_repositories/
 /tmp/
 calibration/
 data/
+.env
