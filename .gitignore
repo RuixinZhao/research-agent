@@ -27,3 +27,4 @@ downloaded_repositories/
 # Temporary & Output artifacts
 /tmp/
 calibration/
+data/

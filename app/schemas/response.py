@@ -43,3 +43,8 @@ class IdeaOutput(BaseModel):
     case_id: str
     path: str
     markdown: str
+
+# 兼容性别名
+ChatResponseSchema = ChatOutput
+IdeaResponseSchema = IdeaOutput
+
