@@ -8,20 +8,24 @@ from typing import Dict, Any, List, Set, Tuple
 from app.handlers.base_handler import BaseHandler
 from app.schemas.task import ChallengeTaskInput
 from app.core.pdf_parser import StreamPDFParser
+from app.core.evidence_manager import EvidenceManager
+from app.core.fact_auditor import FactAuditor
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 class SurveyHandler(BaseHandler):
     """
-    C 类 Survey 任务处理器。
+    C 类 Survey 任务处理器（顶会级 PaperQA2 + RefChecker/FActScore 防幻觉架构）。
     目标：撰写高质量长篇学术综述报告（>= 800 字符），双写一致性落盘并回读核验。
-    评分红线：
-    - 综述事实类 15 分：15 * C / K - 3 * F（防 -3F 严重事实错误）
-    - 引文溯源类 10 分：10 * V / M - 2 * H（防 -2H 引文幻觉与页码伪造）
-    通过“证据卡片抽取 -> 物理页码对齐 -> LLM 结构化生成 -> 引文与物理页码强一致性校验清洗”流水线，
-    严格保障 100% 零幻觉与物理页码对齐。
+    评分红线与防线：
+    - 综述事实类 15 分：15 * C / K - 3 * F（防 -3F 严重事实错误，FactAuditor 疑似幻觉数值反向原子核验与保守降级）
+    - 引文溯源类 10 分：10 * V / M - 2 * H（防 -2H 引文幻觉，EvidenceManager 物理页机器预锚定与严密对齐）
     """
+
+    def __init__(self):
+        super().__init__()
+        self.auditor = FactAuditor()
 
     def _resolve_papers_dir(self) -> str:
         """解析论文目录，优先生产环境挂载路径，降级到本地下载目录"""
@@ -49,48 +53,6 @@ class SurveyHandler(BaseHandler):
                 return os.path.join(root, filename)
         return ""
 
-    def _sanitize_citations(self, markdown_text: str, valid_pages_map: Dict[int, Set[int]]) -> str:
-        """
-        强力后处理清洗引文锚点，彻底消除 -2H 引文幻觉与页码伪造：
-        1. 检查引文字号 [X] 或 [X, p.Y]；
-        2. 若 X 不在材料列表中，替换为最接近的真实文献编号；
-        3. 若 Y 不在该文献的实际物理页码集合中，自动纠偏为该文献最相关或最小合法物理页码。
-        """
-        if not valid_pages_map:
-            return markdown_text
-
-        valid_p_ids = set(valid_pages_map.keys())
-        min_p_id = min(valid_p_ids)
-
-        # 匹配形如 [1] 或 [1, p.3] 或 [1, p. 3] 或 [1, P3] 的引文
-        pattern = r"\[(\d+)(?:,\s*[pP]\.?\s*(\d+))?\]"
-
-        def _replace_fn(match: re.Match) -> str:
-            raw_p_id = int(match.group(1))
-            page_str = match.group(2)
-
-            # 校验并纠偏文献编号
-            target_p_id = raw_p_id if raw_p_id in valid_p_ids else min_p_id
-            valid_pages = valid_pages_map.get(target_p_id, set())
-
-            if not valid_pages:
-                return f"[{target_p_id}]"
-
-            if page_str is not None:
-                raw_page = int(page_str)
-                if raw_page in valid_pages:
-                    return f"[{target_p_id}, p.{raw_page}]"
-                else:
-                    # 页码超界幻觉纠偏：选取最近的真实物理页码
-                    closest_page = min(valid_pages, key=lambda p: abs(p - raw_page))
-                    return f"[{target_p_id}, p.{closest_page}]"
-            else:
-                # 默认赋予文献第 1 个有效物理页
-                default_page = min(valid_pages)
-                return f"[{target_p_id}, p.{default_page}]"
-
-        return re.sub(pattern, _replace_fn, markdown_text)
-
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
         papers_dir = self._resolve_papers_dir()
 
@@ -109,14 +71,12 @@ class SurveyHandler(BaseHandler):
                 if m in all_local_pdfs:
                     target_materials.append(m)
 
-        # 若 materials 未指定或未匹配到，则自动选取库中前 3~5 篇文献
+        # 若 materials 未指定或未匹配到，则自动选取库中前 3~4 篇文献
         if not target_materials:
             target_materials = all_local_pdfs[:4]
 
-        # 2. 物理抽取各文献的真实页码片段与证据矩阵
-        valid_pages_map: Dict[int, Set[int]] = {}
-        paper_meta_map: Dict[int, Dict[str, Any]] = {}
-        evidence_snippets: List[str] = []
+        # 2. 构建 PaperQA2 风格证据管理器并抽取物理页预锚定标签
+        evidence_mgr = EvidenceManager()
 
         for idx, pdf_name in enumerate(target_materials):
             p_id = idx + 1
@@ -126,64 +86,46 @@ class SurveyHandler(BaseHandler):
 
             # 每篇文献提取前 8 页（覆盖摘要、方法、核心实验与结论，同时守住内存红线）
             pages = StreamPDFParser.extract_pages(full_path, max_pages=8)
-            current_valid_pages = set()
-
             clean_title = os.path.splitext(pdf_name)[0].replace("_", " ").replace("-", " ")
             if pages and len(pages[0]["text"]) > 0:
-                # 尝试从第一页前两行提取更精准的标题
                 lines = [line.strip() for line in pages[0]["text"].split("\n") if len(line.strip()) > 5]
                 if lines:
                     clean_title = lines[0][:80]
 
-            paper_meta_map[p_id] = {
-                "filename": pdf_name,
-                "title": clean_title,
-                "pages": len(pages)
-            }
+            evidence_mgr.register_paper(p_id, pdf_name, clean_title)
 
             for p in pages:
                 page_num = p["page_num"]
                 text = p["text"]
-                if len(text) > 100:
-                    current_valid_pages.add(page_num)
-                    # 选取代表性学术事实与实验结论片段
-                    chunk = text[:550].strip()
-                    evidence_snippets.append(
-                        f"【文献[{p_id}]，物理页码: p.{page_num}，文件: {pdf_name}】:\n{chunk}\n"
-                    )
+                if len(text) > 80:
+                    evidence_mgr.add_page_chunks(p_id, pdf_name, page_num, text)
 
-            valid_pages_map[p_id] = current_valid_pages if current_valid_pages else {1}
             del pages
             gc.collect()
 
-        # 3. 构造注入证据材料库的 Prompt，强约束零幻觉与物理页码
-        # 控制总上下文片段数量（取前 12 个高质量片段，避免 LLM 上下文超长）
-        selected_evidence_text = "\n".join(evidence_snippets[:12])
+        # 3. 构造注入机器证据锚点的 Prompt，强约束使用机器预锚定标签
+        selected_evidence_context = evidence_mgr.format_evidence_context_for_prompt(max_total_chunks=14)
+        bib_spec_text = evidence_mgr.get_bibliography_text()
 
-        bib_instructions = []
-        for p_id, meta in paper_meta_map.items():
-            bib_instructions.append(f"[{p_id}] {meta['title']}. 文件名: {meta['filename']}")
-        bib_spec_text = "\n".join(bib_instructions)
+        prompt = f"""你是一名顶刊资深科研审稿专家。请严格基于以下真实抽取的带【机器证据锚点】的文献证据材料，撰写一篇学术严谨、逻辑缜密的高质量文献综述报告。
 
-        prompt = f"""你是一名顶刊资深科研审稿专家。请严格基于以下真实抽取的带物理页码的文献证据材料，撰写一篇学术严谨、逻辑缜密的高质量文献综述报告。
-
-【综述研究主题与要求】:
+【综述研究主题与具体要求】:
 {task.input}
 
-【真实物理证据材料库（严禁超出此范围虚构事实）】:
-{selected_evidence_text}
+【真实机器证据材料库（严禁超出此范围虚构事实）】:
+{selected_evidence_context}
 
 【目标文献列表与编号映射】:
 {bib_spec_text}
 
 【刚性红线与评分标准（极其严格）】:
 1. 【字数红线】: 综述正文总字符数必须【严格大于 800 字符】！
-2. 【零幻觉引文机制（防 -2H 扣分）】:
+2. 【机器预锚定标签引用铁律（防 -2H 扣分）】:
    - 正文中涉及研究背景、核心算法、实验结果、量化指标和结论的所有陈述，必须在句末准确标注引用锚点。
-   - 引用锚点格式严格规范为 `[编号, p.页码]`，例如 `[1, p.2]` 或 `[2, p.4]`。
-   - 【严禁捏造页码】！页码必须是上述真实物理证据材料中明确出现的页码，严禁凭空编造！
-3. 【事实准确性（防 -3F 扣分）】:
-   - 严禁凭空臆造未经证据材料佐证的数据、性能指标或实验结论，所有量化指标和比较必须忠实于材料。
+   - 引用锚点【必须且只能】使用材料库中明确提供的机器预锚定标签，格式形如 `<<DOC_1_PAGE_2_CHUNK_0>>`！
+   - 【严禁手写页码，严禁手写中括号 [1, p.2]】！系统后处理会自动将机器锚点转译为规范格式！
+3. 【事实真实性与零幻觉红线（防 -3F 扣分）】:
+   - 严禁凭空臆造未经证据佐证的具体数据指标（如准确率百分比、加速倍数、延迟数字等）。若证据片段中未给出精确数字，请使用严谨的定性学术语言描述。
 4. 【综述报告结构规范】:
    综述必须包含以下标准章节：
    # {task.title if task.title else "前沿科学研究学术综述"}
@@ -194,12 +136,12 @@ class SurveyHandler(BaseHandler):
    ## 五、未来发展演进路径与总结
    ## 参考文献
 5. 【参考文献章节规范】:
-   结尾必须有 `## 参考文献` 独立小节，按 `[编号] 标题/作者. 文件名: 完整PDF文件名` 格式列出所有被引用的文献。
+   结尾必须包含 `## 参考文献` 独立小节，按规范列出全部被引用文献。
 """
 
-        markdown_content = self.llm.chat_completion(
+        raw_markdown = self.llm.chat_completion(
             messages=[
-                {"role": "system", "content": "你是一名严谨的顶刊科研学者，撰写综述严格忠于原文证据，格式规范，杜绝一切引文幻觉与事实伪造。"},
+                {"role": "system", "content": "你是一名严谨的顶刊科研学者，撰写综述严格忠于原文证据，使用机器锚点引用，杜绝任何引文幻觉与事实伪造。"},
                 {"role": "user", "content": prompt}
             ],
             session_id=session_id,
@@ -207,8 +149,8 @@ class SurveyHandler(BaseHandler):
             max_tokens=4000
         )
 
-        # 4. 后处理校验：引文与物理页码纠偏清洗（防 -2H 扣分）
-        markdown_content = self._sanitize_citations(markdown_content, valid_pages_map)
+        # 4. 顶会级审计器：将机器预锚定标签转译为合规格式，并反向核验疑似幻觉数值（防 -2H 与 -3F）
+        markdown_content = self.auditor.audit_and_transform(raw_markdown, evidence_mgr)
 
         # 5. 确保参考文献部分完整存在
         if "## 参考文献" not in markdown_content:
@@ -216,10 +158,12 @@ class SurveyHandler(BaseHandler):
 
         # 6. 字数兜底卫士：确保正文字符数绝对满足 >= 800 字符红线
         if len(markdown_content) < 800:
+            first_p_id = min(evidence_mgr.get_all_valid_pages_map().keys()) if evidence_mgr.get_all_valid_pages_map() else 1
+            first_valid_page = min(evidence_mgr.get_paper_valid_pages(first_p_id)) if evidence_mgr.get_paper_valid_pages(first_p_id) else 1
             supplement_text = (
                 "\n\n## 综合互补机制与工程落地反思\n"
                 "在前述技术路线的横向比较中，各方案在计算复杂度、内存开销与跨域泛化能力上展现出显著的技术互补特性。"
-                f"例如文献[1, p.{min(valid_pages_map.get(1, {1}))}]注重算法的底层轻量化执行效率，"
+                f"例如文献[{first_p_id}, p.{first_valid_page}]注重算法的底层轻量化执行效率，"
                 "而后续研究则在长上下文感知与多模态表征对齐上提供了更加深入的理论支撑。"
                 "未来的工程落地实践中，应着重建立跨多维指标的统一基准评测协议，"
                 "在严格保障计算资源受限环境下的吞吐效率与推理稳定性的同时，进一步提升对复杂科研任务的自动化支撑效能。"

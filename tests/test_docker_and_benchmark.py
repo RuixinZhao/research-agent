@@ -29,9 +29,64 @@ def test_dockerfile_and_requirements():
     assert any("PyMuPDF" in line for line in req_lines), "requirements.txt 必须包含增补依赖 PyMuPDF"
 
 
-def test_submission_validator_passing_cases():
-    validator = SubmissionValidator(team_name="team")
-    assert validator.run() is True, "已有 25 题产物预检必须 100% PASS"
+def test_submission_validator_passing_cases(tmp_path):
+    team_name = "team"
+    data_dir = tmp_path / "data" / team_name
+    expert_dir = tmp_path / "data" / "expert"
+    fig_dir = tmp_path / "data" / "figure" / team_name
+    data_dir.mkdir(parents=True)
+    expert_dir.mkdir(parents=True)
+    fig_dir.mkdir(parents=True)
+
+    # 构造标准 25 题 dispatch
+    case_ids = [f"{c}-{i:02d}" for c in ("A", "B", "C", "D", "E") for i in range(1, 6)]
+    dispatch_data = {
+        "team": team_name,
+        "case_ids": case_ids,
+        "cases": [
+            {"case_id": cid, "function": "Chat", "question_file": f"data/{team_name}/assigned/{cid}.json"}
+            for cid in case_ids
+        ]
+    }
+    with open(data_dir / "dispatch.json", "w", encoding="utf-8") as f:
+        json.dump(dispatch_data, f, ensure_ascii=False)
+
+    # 构造各类合法产物
+    for cid in case_ids:
+        cat = cid[0]
+        if cat == "A":
+            content = {"case_id": cid, "answer": "学术深度解答机理", "clarifying_question": "范围限定追问？"}
+        elif cat == "B":
+            content = {"case_id": cid, "papers": [{"filename": "paper.pdf", "reason": "高保真匹配"}]}
+        elif cat == "C":
+            md_path = f"data/expert/{cid}-综述-{team_name}.md"
+            md_text = "# 综述\n" + ("正文严谨分析，引用证据材料[1, p.1]。" * 45) + "\n\n## 参考文献\n[1] 文献"
+            (tmp_path / md_path).write_text(md_text, encoding="utf-8")
+            content = {"case_id": cid, "path": md_path, "markdown": md_text}
+        elif cat == "D":
+            fig_path = f"data/figure/{team_name}/{cid}.png"
+            (tmp_path / fig_path).write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+            content = {
+                "case_id": cid,
+                "status": "completed",
+                "metrics": [
+                    {"name": "m1", "unit": "u", "observed": 1.0, "reference": 1.0, "relative_error": 0.0},
+                    {"name": "m2", "unit": "u", "observed": 2.0, "reference": 2.0, "relative_error": 0.0},
+                    {"name": "m3", "unit": "u", "observed": 3.0, "reference": 3.0, "relative_error": 0.0}
+                ],
+                "figures": [{"path": fig_path, "caption": "图", "x_label": "x", "y_label": "y", "legend": "l"}]
+            }
+        elif cat == "E":
+            md_path = f"data/expert/{cid}-灵感Idea报告-{team_name}.md"
+            md_text = "# Idea\n" + ("8大槽位创新方案设计，边界硬隔离学术研究。" * 60)
+            (tmp_path / md_path).write_text(md_text, encoding="utf-8")
+            content = {"case_id": cid, "path": md_path, "markdown": md_text}
+
+        with open(data_dir / f"{cid}.json", "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False)
+
+    validator = SubmissionValidator(team_name=team_name, root_dir=str(tmp_path))
+    assert validator.run() is True, "25 题合规产物预检必须 100% PASS"
     assert len(validator.passed_cases) == 25
     assert len(validator.failed_cases) == 0
 
@@ -60,3 +115,16 @@ def test_mock_llm_server_lifecycle():
     started = server.start()
     assert started is True
     server.stop()
+
+
+def test_dotenv_and_live_llm_runner(tmp_path):
+    from scripts.run_mock_benchmark import load_dotenv_config, MockBenchmarkRunner
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("TEST_KEY=HELLO_WORLD\nCHALLENGE_LLM_MODEL=deepseek-chat\n", encoding="utf-8")
+    cfg = load_dotenv_config(env_file)
+    assert cfg.get("TEST_KEY") == "HELLO_WORLD"
+    assert cfg.get("CHALLENGE_LLM_MODEL") == "deepseek-chat"
+
+    runner = MockBenchmarkRunner(live_llm=True, auto_start=False)
+    assert runner.live_llm is True

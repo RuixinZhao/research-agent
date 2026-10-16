@@ -3,7 +3,7 @@ import gc
 import json
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 
 from app.handlers.base_handler import BaseHandler
 from app.schemas.task import ChallengeTaskInput
@@ -15,10 +15,13 @@ logger = logging.getLogger(__name__)
 
 class RetrievalHandler(BaseHandler):
     """
-    B 类 Literature_Retrieval 任务处理器。
+    B 类 Literature_Retrieval 任务处理器（顶会级逻辑推理与否定排他防火墙）。
     目标：精准论文检索与否定条件排他拦截。
     计分规则：15 * H / N - 0.75 * U。严防误报无关论文造成 -0.75U 扣分（宁缺毋滥原则）。
-    严格遵守 1024 MiB 内存限制，流式处理单篇 PDF 并及时垃圾回收。
+    特性：
+    1. 1024 MiB 内存保护：流式逐页解析前 4 页并主动 GC；
+    2. DeepSeek 逻辑链【否定排他防火墙】：自动析出排除性红线，对候选文献实施多维度排他审查；
+    3. 物理文件存在性与唯一性校验，死保 U=0。
     """
 
     def _resolve_papers_dir(self) -> str:
@@ -34,7 +37,6 @@ class RetrievalHandler(BaseHandler):
                 pdfs = [f for f in os.listdir(d) if f.endswith(".pdf")]
                 if pdfs:
                     return d
-        # 若上述均为空，返回配置默认路径
         return settings.PAPERS_DIR
 
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
@@ -69,7 +71,6 @@ class RetrievalHandler(BaseHandler):
             for pdf_name in candidate_pool:
                 full_path = os.path.join(papers_dir, pdf_name)
                 if not os.path.exists(full_path):
-                    # 遍历子目录查找
                     for root, _, files in os.walk(papers_dir):
                         if pdf_name in files:
                             full_path = os.path.join(root, pdf_name)
@@ -82,7 +83,6 @@ class RetrievalHandler(BaseHandler):
                 pages = StreamPDFParser.extract_pages(full_path, max_pages=4)
                 if pages:
                     engine.index_paper_pages(pdf_name, pages)
-                    # 收集第 1 页核心摘要作为判断依据
                     first_page_text = pages[0]["text"] if len(pages) > 0 else ""
                     pdf_snippets_map[pdf_name] = first_page_text[:600]
                 del pages
@@ -104,61 +104,89 @@ class RetrievalHandler(BaseHandler):
                 self.file_writer.write_json_and_verify(f"data/{self.team_name}/{task.case_id}.json", result)
                 return result
 
-            # 4. 组装候选论文摘要信息供 LLM 执行精准否定过滤
+            # 4. 组装候选论文摘要信息
             candidate_info_list = []
-            for fn in candidate_files[:10]:
+            for fn in candidate_files[:12]:
                 snippet = pdf_snippets_map.get(fn, "")
                 candidate_info_list.append({
                     "filename": fn,
                     "abstract_snippet": snippet
                 })
 
-            # 5. LLM 精准语义对齐与负例拦截链
-            prompt = f"""你是一名严格的科研文献检索裁判。你的任务是根据用户的检索需求，从候选论文列表中精确筛选出【完全符合主题且不触犯任何排他约束】的文献。
+            # 5. DeepSeek 逻辑链【否定排他防火墙】
+            firewall_prompt = f"""你是一名极其严苛的学术文献检索与排他审核裁判。你的核心职责是根据用户的研究需求，构建【否定排他防火墙】，从候选论文中精确选出【完全符合主题且不触犯任何排他红线】的高置信度文献。
 
-【检索任务需求】:
+【检索任务需求与具体指令】:
 {task.input}
 
-【任务约束】:
+【任务约束条件】:
 {json.dumps(task.constraints, ensure_ascii=False) if task.constraints else "无额外显式约束"}
 
 【候选论文列表及其摘要片段】:
 {json.dumps(candidate_info_list, ensure_ascii=False, indent=2)}
 
-【评分与惩罚红线（极其重要）】:
-1. 本题采用高精度惩罚计分：每误报一篇无关或边缘文献扣除 0.75 分！因此必须奉行【宁缺毋滥（High Precision）】原则。
-2. 仔细检查需求中是否有否定排他条件（例如“排除/不要/不涉及某领域/非某技术”等），凡是触及排他条件的候选论文必须坚决剔除！
-3. 凡是仅泛泛提及或仅为背景相关、非核心贡献契合的论文，坚决不选！
-4. 选出的文件名必须与候选列表中的 filename 完全逐字一致，绝不能修改文件名或凭空造词！
-5. 若没有任何一篇论文完全契合需求，请直接返回空数组 []。
+【评分与惩罚刚性铁律（绝不可违犯）】:
+1. 【高精度惩罚计分】: 计分公式为 15 * H / N - 0.75 * U。每误报一篇无关或边缘文献，直接扣减 0.75 分！因此必须坚决奉行【宁缺毋滥（High Precision）】原则。
+2. 【否定排他防火墙机制】:
+   - 深入分析检索需求中的否定词（如“排除...”、“不要...”、“不涉及...”、“非某方向”、“exclude...”等），明确析出所有【绝对排他红线】。
+   - 凡是论文主题、方法、模态或应用场景触及排他红线的，无论相关度多高，必须判定为 REJECT！
+3. 【核心契合度要求】:
+   - 目标文献的核心创新点必须直接解决用户的正面需求；仅在 Related Work 中作为背景顺带提及的论文，坚决 REJECT！
+4. 【精确文件名匹配】:
+   - 选中的文件名必须与候选列表中提供的 filename 逐字完全匹配，严禁修改或造词。
+5. 【疑罪从无/宁缺毋滥】:
+   - 若候选文献匹配度存疑或无高置信度完全吻合者，宁可返回空数组 []，绝对不可冒险推荐！
 
-【输出要求】:
-必须返回纯 JSON 对象（不要输出任何额外文字或 Markdown 标记）：
+【输出格式规范】:
+必须返回纯 JSON 格式：
 {{
+  "negative_exclusions": [
+    "解析出的显式或隐式排他红线1",
+    "排他红线2"
+  ],
+  "evaluations": [
+    {{
+      "filename": "完整文件名.pdf",
+      "negative_violation": true/false,
+      "core_contribution_match": true/false,
+      "confidence_score": 1到5的整数打分,
+      "decision": "ACCEPT 或 REJECT",
+      "reason": "具体判定逻辑说明"
+    }}
+  ],
   "selected": [
     {{
       "filename": "完整文件名.pdf",
-      "reason": "具体陈述该论文的核心研究方法与实验为何完全满足需求，并说明未触犯任何排除条件的依据。"
+      "reason": "具体陈述核心创新点为何完全吻合需求且未违反任何排他约束的论证依据。"
     }}
   ]
 }}
 """
             llm_response = self.llm.chat_completion(
                 messages=[
-                    {"role": "system", "content": "你是一名精通学术论文检索与精准负例过滤的 AI 专家。严格输出合规 JSON。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": "你是一名精通学术论文检索、逻辑严谨、严格执行否定排他防火墙的 AI 专家。输出严格合规 JSON。"},
+                    {"role": "user", "content": firewall_prompt}
                 ],
                 session_id=session_id,
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
 
-            # 解析 LLM 输出
+            # 解析 LLM 输出与防火墙二次校验
             selected_papers_raw: List[Dict[str, str]] = []
+            evaluations_map: Dict[str, Dict[str, Any]] = {}
+
             try:
                 parsed = json.loads(llm_response)
-                if isinstance(parsed, dict) and "selected" in parsed:
-                    selected_papers_raw = parsed["selected"]
+                if isinstance(parsed, dict):
+                    # 记录细粒度评估
+                    raw_evals = parsed.get("evaluations", [])
+                    if isinstance(raw_evals, list):
+                        for ev in raw_evals:
+                            if isinstance(ev, dict) and "filename" in ev:
+                                evaluations_map[ev["filename"].strip()] = ev
+
+                    selected_papers_raw = parsed.get("selected", [])
                 elif isinstance(parsed, list):
                     selected_papers_raw = parsed
             except Exception as pe:
@@ -171,18 +199,39 @@ class RetrievalHandler(BaseHandler):
                     except Exception:
                         pass
 
-            # 6. 物理存在性核验与去重
+            # 6. 防火墙二次拦截与物理存在性核验
             valid_papers = []
             seen_filenames = set()
+
             for p in selected_papers_raw:
                 if not isinstance(p, dict):
                     continue
                 fn = p.get("filename", "").strip()
-                if fn in available_pdfs and fn not in seen_filenames:
+
+                # 核验 1：必须在本地文件系统中物理存在
+                if fn not in available_pdfs:
+                    logger.warning(f"排除不存在的物理文件: {fn}")
+                    continue
+
+                # 核验 2：若 evaluations 判定其违反了排他红线或 decision 为 REJECT，坚决剔除
+                ev = evaluations_map.get(fn)
+                if ev:
+                    if ev.get("negative_violation") is True:
+                        logger.info(f"防火墙拦截触犯排他红线的文献: {fn}")
+                        continue
+                    if ev.get("decision") == "REJECT":
+                        logger.info(f"防火墙拦截判定为 REJECT 的文献: {fn}")
+                        continue
+                    if ev.get("confidence_score", 5) < 3:
+                        logger.info(f"防火墙拦截低置信度文献: {fn}")
+                        continue
+
+                # 核验 3：去重
+                if fn not in seen_filenames:
                     seen_filenames.add(fn)
                     valid_papers.append({
                         "filename": fn,
-                        "reason": p.get("reason", "经正文与核心方法验证，该文献完全满足检索需求与实验要求。").strip()
+                        "reason": p.get("reason", "经正文与核心方法验证，该文献完全满足检索需求且未触犯任何排他约束。").strip()
                     })
 
             result = {

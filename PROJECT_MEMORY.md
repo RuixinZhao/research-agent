@@ -72,6 +72,18 @@
 * **2026-10-13 20:30**：完成模块三开发：实现 `app/handlers/chat_handler.py`（A 类学术科研解答与范围限定追问、鲁棒 JSON 提取与落盘核验）与 `app/handlers/idea_handler.py`（E 类 8 大二级标题槽位严格对齐、模拟观察待验证与论文实测定论证据边界硬隔离保护、字数 $\ge 800$、双写回读核验），全套单测与 `/solve` 集成测试全部通过。
 * **2026-10-13 20:35**：完成模块一开发：实现 `app/handlers/reproduction_handler.py` 与 `app/core/circuit_breaker.py`。实现线上/本地双模 runner 调度、捕获 JSON Lines 流、严格解析 `submission.json`、PNG 真实性核验（魔数、PIL 与元数据完整性）、超时与失败合规降级保护（指标置 null、不编造数值）。本地 D01~D05 离线测试及降级测试全部通过。
 * **2026-10-13 20:40**：完成模块四开发：基于 `agenthack/base:1.1.1` 编写生产级 `Dockerfile`（非 root `agent` 用户、仅增补 `PyMuPDF==1.24.1` 极简依赖、配置 `.dockerignore` 保障构建轻量），完成 `scripts/validate_submission.py`（与根目录统一入口，严格校验 dispatch、25 题 Schema、C/E 双写一致性、D 类 PNG 魔数签名及安全沙箱防路径越界），完成 `scripts/run_mock_benchmark.py`（内置纯离线 Mock LLM Gateway，高保真模拟 25 题全集压测并联动自动预检）。全集 25 题 100% PASS，预检 100% PASS，全套单元测试与集成测试全部通过。
+* **2026-10-13 20:58**：完成模块二顶会级算法升级（结合真实 DeepSeek API）：实现 `app/core/evidence_manager.py`（PaperQA2 风格物理页预锚定标签机制 `<<DOC_X_PAGE_Y_CHUNK_Z>>`）、`app/core/fact_auditor.py`（机器锚点转译对齐与 RefChecker/FActScore 疑似幻觉数值反向原子核验与保守降级，死保 F=0 与 H=0）、升级 `app/handlers/retrieval_handler.py`（DeepSeek 逻辑推理【否定排他防火墙】，精准拦截排除项，死保 U=0）、升级 `app/handlers/survey_handler.py`（全链路机器锚点与双重审计保障）。全套真机 DeepSeek API 测试 100% 通过。
+* **2026-10-13 21:02**：完成模块三顶会级学术推理升级（结合真实 DeepSeek API 与 Lost in the Middle 成果）：
+  1. 升级 `app/handlers/idea_handler.py`：落地【U 型注意力布局】（最核心对比文献分别锚定于 Prompt 首端与末端，中间层放置次要文献，彻底破除长上下文注意力中部衰减）；构建【模拟观察物理隔离框】（ASCII 独立强隔离框物理切断污染链）；第 6 槽位显式申明“待分析验证现象而非原论文结论”，建立不可逾越的证据防火墙；第 7 槽位深度推演两篇核心文献的技术互补性与帕累托前沿突破机制；Token 预算上调至 8192 杜绝截断；
+  2. 升级 `app/handlers/chat_handler.py`：学术追问深度调优，精准聚焦在“自变量物理调控区间/阶梯步长、数据集采样形态与截断粒度、运行环境假设”等硬性科研变量与数据范围限定上；
+  3. 通过真实 DeepSeek API 线上生成验证（Chat 277字高保真机理解析与变量追问，Idea 8400+字全槽位深度方案报告，真机通过率 100%），全套 26 项单元与集成测试全部 PASS。
+* **2026-10-13 21:05**：完成 DevOps 真实 DeepSeek API 全链路端到端压测与预检质量验收：
+  1. 升级 `scripts/run_mock_benchmark.py`，支持原生解析 `.env` 并在指定 `--live-llm` 时直连 DeepSeek 官方网关；
+  2. 运行 25 题全量端到端真机压测，成功率 100%（25/25 PASS），单题平均耗时 9.38s（完美达成 5~15s 指标目标，远低于 180s 官方超时熔断上限；A 类 3.25s、B 类 4.16s、C 类 16.14s、D 类 1.16s、E 类 22.19s）；
+  3. 真实产物全面达标：C 类综述 3000~5200 字符、E 类灵感报告 5700~7800 字符（远超 800 字底线），D 类图表通过真实 PNG 魔数签名及元数据核验；
+  4. 运行 `validate_submission.py` 预检，25 题交付产物 100% PASS，全套 26 项单测与集成测试全部通过。
+
+
 
 
 

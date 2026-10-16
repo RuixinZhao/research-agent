@@ -45,6 +45,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("MockBenchmark")
 
 
+def load_dotenv_config(env_path: Optional[Path] = None) -> Dict[str, str]:
+    """读取并解析 .env 文件中的配置项"""
+    target = env_path or (_PROJECT_ROOT / ".env")
+    env_vars: Dict[str, str] = {}
+    if not target.is_file():
+        return env_vars
+    with open(target, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                env_vars[key] = val
+    return env_vars
+
+
 class MockLLMHandler(http.server.BaseHTTPRequestHandler):
     """
     轻量级仿真 OpenAI-compatible LLM Gateway。
@@ -202,10 +221,17 @@ class MockLLMServer:
 class MockBenchmarkRunner:
     """25 题全集压测执行调度引擎"""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8080", team_name: str = "team", auto_start: bool = True):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8080",
+        team_name: str = "team",
+        auto_start: bool = True,
+        live_llm: bool = False
+    ):
         self.base_url = base_url.rstrip("/")
         self.team_name = team_name
         self.auto_start = auto_start
+        self.live_llm = live_llm
         self.server_process: Optional[subprocess.Popen] = None
         self.llm_server: Optional[MockLLMServer] = None
         self.client = httpx.Client(timeout=180.0)
@@ -309,9 +335,26 @@ class MockBenchmarkRunner:
 
     def _ensure_services_ready(self) -> None:
         """检查并确保 LLM Gateway 与 Agent Server 处于就绪状态"""
-        # 1. 启动仿真 LLM Gateway
-        self.llm_server = MockLLMServer(host="127.0.0.1", port=8000)
-        self.llm_server.start()
+        env_vars = os.environ.copy()
+        dotenv_vars = load_dotenv_config()
+        env_vars.update(dotenv_vars)
+
+        if self.live_llm:
+            # 1. 真实 DeepSeek API 网关模式
+            base_url = env_vars.get("CHALLENGE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+            model = env_vars.get("CHALLENGE_LLM_MODEL", "deepseek-chat")
+            api_key = env_vars.get("CHALLENGE_LLM_API_KEY", "")
+            if not api_key or api_key == "EMPTY":
+                raise ValueError(".env 中未配置有效 CHALLENGE_LLM_API_KEY，无法使用 --live-llm 模式")
+            logger.info(f"🌐 已激活真实 DeepSeek API 模式 (--live-llm): {base_url} | 模型: {model}")
+            for k, v in dotenv_vars.items():
+                os.environ[k] = v
+        else:
+            # 1. 本地轻量级仿真 Mock LLM Gateway 模式
+            self.llm_server = MockLLMServer(host="127.0.0.1", port=8000)
+            self.llm_server.start()
+            env_vars["CHALLENGE_LLM_BASE_URL"] = "http://127.0.0.1:8000/v1"
+            logger.info("🤖 已激活仿真 Mock LLM Gateway 离线模式")
 
         # 2. 检查 Agent Server 探活
         server_ready = False
@@ -325,12 +368,10 @@ class MockBenchmarkRunner:
 
         if not server_ready and self.auto_start:
             logger.info("未探测到现有 Agent Server，正在以子进程自动拉起 server.py...")
-            env = os.environ.copy()
-            env["RESEARCH_WORKSPACE_TEAM"] = self.team_name
-            env["CHALLENGE_LLM_BASE_URL"] = "http://127.0.0.1:8000/v1"
+            env_vars["RESEARCH_WORKSPACE_TEAM"] = self.team_name
             self.server_process = subprocess.Popen(
                 [sys.executable, "server.py"],
-                env=env,
+                env=env_vars,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
@@ -357,7 +398,8 @@ class MockBenchmarkRunner:
         self._ensure_services_ready()
 
         print("\n" + "=" * 76)
-        print("⚡️ 科研助手 Agent 25 题全集高保真本地并发/串行全量压测开始")
+        mode_str = "🌐 真实 DeepSeek API 端到端评测 (--live-llm)" if self.live_llm else "🤖 离线仿真 Mock LLM 网关"
+        print(f"⚡️ 科研助手 Agent 25 题全集自动化压测开始 [{mode_str}]")
         print(f"🎯 目标网关: {self.base_url}/solve | 队伍标识: {self.team_name}")
         print("=" * 76)
 
@@ -425,6 +467,9 @@ class MockBenchmarkRunner:
         print(f"最长单题耗时: {max(latencies):.2f}s (P99)")
         print(f"最短单题耗时: {min(latencies):.2f}s")
         print(f"全集总测试用时: {t_total:.2f}s")
+        if self.live_llm:
+            target_status = "达标 (5~15s 内，远低于 180s 官方熔断上限)" if avg_latency <= 20.0 else "需关注"
+            print(f"延迟性能评估: {target_status}")
         print("=" * 76)
 
         # 类别维度细化耗时
@@ -464,13 +509,15 @@ def main() -> int:
     parser.add_argument("--url", default="http://127.0.0.1:8080", help="Agent 服务入口 URL")
     parser.add_argument("--team", default=None, help="参赛队伍名称")
     parser.add_argument("--no-auto-start", action="store_true", help="不自动拉起 server.py")
+    parser.add_argument("--live-llm", action="store_true", help="使用 .env 中配置的真实 DeepSeek API 网关（验证端到端真实生成效果）")
     args = parser.parse_args()
 
     team = args.team or os.environ.get("RESEARCH_WORKSPACE_TEAM", "team")
     runner = MockBenchmarkRunner(
         base_url=args.url,
         team_name=team,
-        auto_start=not args.no_auto_start
+        auto_start=not args.no_auto_start,
+        live_llm=args.live_llm
     )
 
     try:

@@ -19,7 +19,6 @@ def clean_test_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "WORKSPACE_OUTPUT", str(output_dir))
     return output_dir
 
-
 def test_chat_handler_success(clean_test_workspace):
     task = ChallengeTaskInput(
         case_id="A-01",
@@ -35,7 +34,7 @@ def test_chat_handler_success(clean_test_workspace):
     handler = ChatHandler()
     mock_response = json.dumps({
         "answer": "策略漂移源于非平稳环境（Non-stationary Environment）下多智能体联合策略分布的动态迁移。根据博弈论形式化，状态转移概率不仅取决于自身动作，还强耦合于其他智能体的参数更新。针对此问题，通常引入分布式值函数分解或经验回放重要性采样权重修正以稳定纳什均衡收敛。",
-        "clarifying_question": "请问本研究设定的多智能体博弈场景是零和博弈还是一般和博弈，以及智能体之间的观测是完全可观测还是部分可观测（POMDP）？"
+        "clarifying_question": "请问本研究拟将多智能体交互的自变量环境非平稳度设定在何种动态噪声阶梯，以及评测基准数据集的观测空间是完全可观测还是受限部分可观测（POMDP）？"
     }, ensure_ascii=False)
 
     with patch.object(handler.llm, "chat_completion", return_value=mock_response):
@@ -70,7 +69,7 @@ def test_chat_handler_with_code_fence_and_fallback(clean_test_workspace):
     # 模拟带有 markdown 围栏的输出
     mock_response_fence = "```json\n" + json.dumps({
         "answer": "在小样本低资源对比学习中，表示崩溃（Representation Collapse）主要归因于负样本多样性匮乏，导致投影头特征空间坍缩至单一低维子流形。",
-        "clarifying_question": "请问本研究采用的具体样本规模（N-way K-shot）以及目标评估的下游任务迁移域是什么？"
+        "clarifying_question": "请问本研究拟采用的具体样本规模（N-way K-shot）调节范围为何，以及核心自变量对比温度系数的离散搜索步长如何限定？"
     }) + "\n```"
 
     with patch.object(handler.llm, "chat_completion", return_value=mock_response_fence):
@@ -79,6 +78,57 @@ def test_chat_handler_with_code_fence_and_fallback(clean_test_workspace):
     assert result["case_id"] == "A-02"
     assert "表示崩溃" in result["answer"]
     assert "N-way K-shot" in result["clarifying_question"]
+
+def test_idea_u_shaped_literature_layout():
+    """验证基于 Lost in the Middle 的 U 型注意力布局"""
+    task = ChallengeTaskInput(
+        case_id="E-03",
+        function="Idea",
+        title="测试文献布局",
+        input="测试多文献输入",
+        materials=["Paper_A_Theory.pdf", "Paper_Mid1.pdf", "Paper_Mid2.pdf", "Paper_B_Engineering.pdf"],
+        constraints=[],
+        expected_output="报告",
+        output_schema_ref="Idea"
+    )
+
+    handler = IdeaHandler()
+    u_context, paper_a, paper_b = handler._format_u_shaped_literature(task)
+
+    assert paper_a == "Paper_A_Theory.pdf"
+    assert paper_b == "Paper_B_Engineering.pdf"
+    assert "首因效应锚点 (Primacy Anchor)" in u_context
+    assert "近因效应锚点 (Recency Anchor)" in u_context
+    assert "中间背景文献层 (Middle Context)" in u_context
+    assert "Paper_Mid1.pdf" in u_context
+
+    # 验证在整个 prompt 中文献布局呈现 U 型首尾锚定
+    prompt = handler._build_prompt(task)
+    idx_a = prompt.find("首因效应锚点")
+    idx_mid = prompt.find("中间背景文献层")
+    idx_b = prompt.find("近因效应锚点")
+    assert idx_a < idx_mid < idx_b
+
+def test_idea_simulated_observation_isolation_box():
+    """验证模拟观察高压物理隔离框"""
+    task = ChallengeTaskInput(
+        case_id="E-04",
+        function="Idea",
+        title="树荫规划",
+        input="阅读城市气候论文。模拟观察显示：最短路线经过的无遮荫路段较多，但未测试替代策略。",
+        materials=["Paper1.pdf", "Paper2.pdf"],
+        constraints=["只把题目给出的模拟观察作为待分析现象，不得写成论文实测结论"],
+        expected_output="报告",
+        output_schema_ref="Idea"
+    )
+
+    handler = IdeaHandler()
+    prompt = handler._build_prompt(task)
+
+    assert "🛑【高压禁区与证据边界物理隔离框 —— 题目模拟观察（待验证经验现象）】" in prompt
+    assert "绝对禁止将其混淆、表述或推断为相关参考文献已有的“论文实测结论/定论”" in prompt
+    assert "待分析验证现象而非原论文结论" in prompt
+
 
 def test_idea_handler_success_and_slots_and_evidence_boundary(clean_test_workspace):
     task = ChallengeTaskInput(
@@ -123,8 +173,8 @@ $$C(e, t) = \\alpha \\cdot \\text{Dist}(e) + \\beta \\cdot \\int_{t_0}^{t_1} \\t
 4. 统计显著性检验采用 Wilcoxon 符号秩检验，设置置信水平 95% ($p < 0.01$)。
 
 ## 6. 复现瓶颈与观察边界反思
-### 6.1 证据边界硬隔离说明（模拟观察待验证 vs 论文实测定论）
-必须郑重确立证据边界隔离准则：题目背景中给出的“最短路线经过的无遮荫路段较多”仅为特定受限仿真环境下的**初步待验证模拟观察（Preliminary Simulated Observation）**，缺乏广泛的多样化拓扑验证与统计显著性检验，**坚决禁止将其表述为参考文献中的实测定论（Empirical Conclusion）**。原论文所确立的实测结论仅限于特定微尺度冠层截获辐射机理，并未对全城域替代规划策略进行端到端实测。在本文方案中，我们将该模拟观察作为待证伪假说，在后续实验方案中设置双盲对照组，在不同遮荫丰度区域开展严格统计核验。
+### 6.1 证据边界硬隔离说明（待分析验证现象而非原论文结论）
+必须郑重确立证据边界隔离准则：题目背景中给出的“最短路线经过的无遮荫路段较多”仅为特定受限仿真环境下的**初步待验证模拟观察（Preliminary Simulated Observation）**，缺乏广泛的多样化拓扑验证与统计显著性检验，**坚决属于待分析验证现象而非原论文结论**。原论文所确立的实测结论仅限于特定微尺度冠层截获辐射机理，并未对全城域替代规划策略进行端到端实测。在本文方案中，我们将该模拟观察作为待证伪假说，在后续实验方案中设置双盲对照组，在不同遮荫丰度区域开展严格统计核验。
 
 ### 6.2 算法复现瓶颈与可重现性反思
 在复现与落地过程中存在以下瓶颈：街景图像冠层三维立体重建开销高昂；微气候模拟 CFD 流体计算延迟达分钟级，难以实时响应毫秒级移动端寻路请求；且移动阴影随日照角度剧烈漂移，存在显著的端侧缓存失效问题。
@@ -155,11 +205,9 @@ $$C(e, t) = \\alpha \\cdot \\text{Dist}(e) + \\beta \\cdot \\int_{t_0}^{t_1} \\t
     for heading_tag, slot_name in REQUIRED_SLOT_HEADINGS:
         assert slot_name.split(". ")[-1] in result["markdown"], f"Missing slot: {slot_name}"
 
-    # 2. 验证证据边界硬隔离
-    assert "证据边界" in result["markdown"]
+    # 2. 验证证据边界硬隔离显式声明
+    assert "待分析验证现象而非原论文结论" in result["markdown"]
     assert "模拟观察" in result["markdown"]
-    assert "实测定论" in result["markdown"]
-    assert "实测结论" in result["markdown"]
 
     # 3. 验证字数达标 (>= 800)
     assert len(result["markdown"]) >= 800
@@ -214,6 +262,6 @@ def test_idea_handler_missing_slots_auto_recovery(clean_test_workspace):
     # 验证缺失的槽位被自动补全
     assert "基准数据集与数据特征" in result["markdown"]
     assert "多篇文献互补与协同机制" in result["markdown"]
-    assert "证据边界硬隔离说明" in result["markdown"]
+    assert "待分析验证现象而非原论文结论" in result["markdown"]
     assert "参考文献" in result["markdown"]
     assert len(result["markdown"]) >= 800
