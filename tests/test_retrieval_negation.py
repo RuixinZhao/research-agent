@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import pytest
 import fitz
@@ -96,95 +97,12 @@ def _mock_firewall_llm_response(messages, **kwargs):
             user_prompt = m["content"]
             break
 
+    # 准确从 prompt 中提取任务需求，避免候选列表中的词汇干扰判定
+    task_match = re.search(r"【检索任务需求与具体指令】:\s*\n(.*?)\n\n", user_prompt, re.DOTALL)
+    task_input = task_match.group(1).strip() if task_match else user_prompt
+
     # 解析 prompt 中的任务需求与排他意图
-    if "神经网络" in user_prompt and ("不包含" in user_prompt or "排除" in user_prompt):
-        return json.dumps({
-            "negative_exclusions": ["神经网络"],
-            "evaluations": [
-                {
-                    "filename": "Classical_SVM_Classification.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
-                    "decision": "ACCEPT",
-                    "reason": "该文献研究经典支持向量机方法，未采用任何神经网络，完全符合排他要求。"
-                },
-                {
-                    "filename": "Deep_Neural_Network_Vision.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
-                    "decision": "REJECT",
-                    "reason": "该文献核心方法为深度神经网络，直接触碰不包含神经网络的排他红线。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "Classical_SVM_Classification.pdf",
-                    "reason": "研究经典支持向量机分类，未触碰神经网络排他红线。"
-                }
-            ]
-        }, ensure_ascii=False)
-
-    elif "协同过滤" in user_prompt and "排除" in user_prompt:
-        return json.dumps({
-            "negative_exclusions": ["协同过滤"],
-            "evaluations": [
-                {
-                    "filename": "Content_Based_RecSys.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
-                    "decision": "ACCEPT",
-                    "reason": "该文献聚焦基于内容的推荐系统，未采用协同过滤，符合排他要求。"
-                },
-                {
-                    "filename": "Collaborative_Filtering_RecSys.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
-                    "decision": "REJECT",
-                    "reason": "该文献核心方法正是协同过滤，触碰绝对排他红线。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "Content_Based_RecSys.pdf",
-                    "reason": "研究基于内容的推荐系统，排除了协同过滤方法。"
-                }
-            ]
-        }, ensure_ascii=False)
-
-    elif "GPT" in user_prompt and ("不要" in user_prompt or "不包含" in user_prompt):
-        return json.dumps({
-            "negative_exclusions": ["GPT"],
-            "evaluations": [
-                {
-                    "filename": "LLaMA_Open_Foundation_Model.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
-                    "decision": "ACCEPT",
-                    "reason": "该文献为开源大语言模型 LLaMA，非 GPT 系列，完全合规。"
-                },
-                {
-                    "filename": "GPT_Generative_Pretrained_Transformer.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
-                    "decision": "REJECT",
-                    "reason": "该文献为 GPT 论文，触犯排他约束。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "LLaMA_Open_Foundation_Model.pdf",
-                    "reason": "介绍大语言模型且不包含 GPT 系列文献。"
-                }
-            ]
-        }, ensure_ascii=False)
-
-    elif "节点分类" in user_prompt and ("不涉及" in user_prompt or "排除" in user_prompt):
+    if "节点分类" in task_input:
         return json.dumps({
             "negative_exclusions": ["节点分类"],
             "evaluations": [
@@ -213,7 +131,94 @@ def _mock_firewall_llm_response(messages, **kwargs):
             ]
         }, ensure_ascii=False)
 
-    elif "Transformer" in user_prompt or "注意力机制" in user_prompt:
+    elif "神经网络" in task_input:
+        return json.dumps({
+            "negative_exclusions": ["神经网络"],
+            "evaluations": [
+                {
+                    "filename": "Classical_SVM_Classification.pdf",
+                    "negative_violation": False,
+                    "core_contribution_match": True,
+                    "confidence_score": 5,
+                    "decision": "ACCEPT",
+                    "reason": "该文献研究经典支持向量机方法，未采用任何神经网络，完全符合排他要求。"
+                },
+                {
+                    "filename": "Deep_Neural_Network_Vision.pdf",
+                    "negative_violation": True,
+                    "core_contribution_match": False,
+                    "confidence_score": 1,
+                    "decision": "REJECT",
+                    "reason": "该文献核心方法为深度神经网络，直接触碰不包含神经网络的排他红线。"
+                }
+            ],
+            "selected": [
+                {
+                    "filename": "Classical_SVM_Classification.pdf",
+                    "reason": "研究经典支持向量机分类，未触碰神经网络排他红线。"
+                }
+            ]
+        }, ensure_ascii=False)
+
+    elif "协同过滤" in task_input:
+        return json.dumps({
+            "negative_exclusions": ["协同过滤"],
+            "evaluations": [
+                {
+                    "filename": "Content_Based_RecSys.pdf",
+                    "negative_violation": False,
+                    "core_contribution_match": True,
+                    "confidence_score": 5,
+                    "decision": "ACCEPT",
+                    "reason": "该文献聚焦基于内容的推荐系统，未采用协同过滤，符合排他要求。"
+                },
+                {
+                    "filename": "Collaborative_Filtering_RecSys.pdf",
+                    "negative_violation": True,
+                    "core_contribution_match": False,
+                    "confidence_score": 1,
+                    "decision": "REJECT",
+                    "reason": "该文献核心方法正是协同过滤，触碰绝对排他红线。"
+                }
+            ],
+            "selected": [
+                {
+                    "filename": "Content_Based_RecSys.pdf",
+                    "reason": "研究基于内容的推荐系统，排除了协同过滤方法。"
+                }
+            ]
+        }, ensure_ascii=False)
+
+    elif "GPT" in task_input:
+        return json.dumps({
+            "negative_exclusions": ["GPT"],
+            "evaluations": [
+                {
+                    "filename": "LLaMA_Open_Foundation_Model.pdf",
+                    "negative_violation": False,
+                    "core_contribution_match": True,
+                    "confidence_score": 5,
+                    "decision": "ACCEPT",
+                    "reason": "该文献为开源大语言模型 LLaMA，非 GPT 系列，完全合规。"
+                },
+                {
+                    "filename": "GPT_Generative_Pretrained_Transformer.pdf",
+                    "negative_violation": True,
+                    "core_contribution_match": False,
+                    "confidence_score": 1,
+                    "decision": "REJECT",
+                    "reason": "该文献为 GPT 论文，触犯排他约束。"
+                }
+            ],
+            "selected": [
+                {
+                    "filename": "LLaMA_Open_Foundation_Model.pdf",
+                    "reason": "介绍大语言模型且不包含 GPT 系列文献。"
+                }
+            ]
+        }, ensure_ascii=False)
+
+    elif "Transformer" in task_input or "注意力机制" in task_input:
         return json.dumps({
             "negative_exclusions": [],
             "evaluations": [
