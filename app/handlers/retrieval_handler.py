@@ -39,6 +39,22 @@ class RetrievalHandler(BaseHandler):
                     return d
         return settings.PAPERS_DIR
 
+    def _extract_negation_keywords(self, text: str) -> Set[str]:
+        """从用户查询文本中提取显式排他/否定关键词"""
+        keywords = set()
+        patterns = [
+            r"(?:不包含|不要包含|排除|不涉及|不采用|除外|剔除|不要有|不要)\s*['\"“]?([A-Za-z0-9\u4e00-\u9fa5_-]+)['\"”]?",
+            r"exclude\s+['\"“]?([A-Za-z0-9_-]+)['\"”]?",
+            r"without\s+['\"“]?([A-Za-z0-9_-]+)['\"”]?",
+        ]
+        for pat in patterns:
+            for match in re.findall(pat, text, re.IGNORECASE):
+                cleaned = match.strip()
+                cleaned = re.sub(r"(?:方法|算法|模型|方向|技术)?(?:的文献|的论文|相关|的)?$", "", cleaned)
+                if len(cleaned) >= 2:
+                    keywords.add(cleaned)
+        return keywords
+
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
         papers_dir = self._resolve_papers_dir()
 
@@ -200,8 +216,17 @@ class RetrievalHandler(BaseHandler):
                         pass
 
             # 6. 防火墙二次拦截与物理存在性核验
+
             valid_papers = []
             seen_filenames = set()
+
+            # 提取显式否定排他关键词（规则层 + LLM 输出的 negative_exclusions）
+            explicit_neg_kws = self._extract_negation_keywords(task.input)
+            for ex in parsed.get("negative_exclusions", []):
+                if isinstance(ex, str) and ex.strip():
+                    cleaned_ex = re.sub(r"(?:方法|算法|模型|方向|技术)?(?:的文献|的论文|相关|的)?$", "", ex.strip())
+                    if len(cleaned_ex) >= 2:
+                        explicit_neg_kws.add(cleaned_ex)
 
             for p in selected_papers_raw:
                 if not isinstance(p, dict):
@@ -225,6 +250,20 @@ class RetrievalHandler(BaseHandler):
                     if ev.get("confidence_score", 5) < 3:
                         logger.info(f"防火墙拦截低置信度文献: {fn}")
                         continue
+
+                # 核验 2.1：规则层双重排他校验（防 -0.75U 误报）
+                # 检查文件名与正文摘要片段是否包含明确被排他的关键词
+                snippet_text = pdf_snippets_map.get(fn, "").lower()
+                fn_lower = fn.lower()
+                is_neg_violated = False
+                for neg_kw in explicit_neg_kws:
+                    kw_lower = neg_kw.lower()
+                    if kw_lower in fn_lower or kw_lower in snippet_text:
+                        logger.info(f"防火墙双重校验拦截包含排他关键词 '{neg_kw}' 的文献: {fn}")
+                        is_neg_violated = True
+                        break
+                if is_neg_violated:
+                    continue
 
                 # 核验 3：去重
                 if fn not in seen_filenames:

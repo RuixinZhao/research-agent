@@ -319,3 +319,143 @@ def test_reproduction_concurrent_multi_tasks(isolated_repro_env):
         assert disk_data["case_id"] == cid
         assert disk_data["status"] == "completed"
 
+
+# -------------------------------------------------------------
+# 5. Relative Error & Figures Validation Unit Tests
+# -------------------------------------------------------------
+
+def test_relative_error_computed_when_both_values_present(isolated_repro_env, monkeypatch):
+    """验证当 reference 和 observed 同时存在时，准确计算 relative_error = |observed - reference| / |reference|"""
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    mock_submission = {
+        "case_id": "D-01",
+        "status": "completed",
+        "metrics": [
+            {"name": "Macro-F1", "unit": "分数", "reference": 1.0, "observed": 0.95, "relative_error": None},
+            {"name": "Accuracy", "unit": "%", "reference": 100.0, "observed": 92.5, "relative_error": None},
+            {"name": "运行时间", "unit": "秒", "reference": 10.0, "observed": 12.0, "relative_error": None},
+        ],
+        "figures": []
+    }
+
+    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    task = ChallengeTaskInput(
+        case_id="D-01",
+        function="Reproduction",
+        title="D-01 相对误差测试",
+        input="测试 relative_error 计算",
+        materials=[],
+        constraints=[],
+        expected_output="relative_error 正确计算",
+        output_schema_ref="Reproduction"
+    )
+
+    result = handler.handle(task, session_id="test-session-rel-err")
+    assert result["status"] == "completed"
+    metrics = result["metrics"]
+    assert len(metrics) == 3
+
+    # Macro-F1: |0.95 - 1.0| / 1.0 = 0.05
+    assert metrics[0]["relative_error"] == pytest.approx(0.05, abs=1e-5)
+    # Accuracy: |92.5 - 100.0| / 100.0 = 0.075
+    assert metrics[1]["relative_error"] == pytest.approx(0.075, abs=1e-5)
+    # 运行时间: |12.0 - 10.0| / 10.0 = 0.2
+    assert metrics[2]["relative_error"] == pytest.approx(0.2, abs=1e-5)
+
+
+def test_relative_error_none_when_reference_missing(isolated_repro_env, monkeypatch):
+    """验证当 reference 缺失或为 0 时，relative_error 保持为 None"""
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    mock_submission = {
+        "case_id": "D-02",
+        "status": "completed",
+        "metrics": [
+            {"name": "Recall@5", "unit": "%", "reference": None, "observed": 95.0, "relative_error": None},
+            {"name": "MRR@10", "unit": "分数", "reference": 0.0, "observed": 0.5, "relative_error": None},
+            {"name": "查询吞吐", "unit": "queries/s", "reference": 100.0, "observed": None, "relative_error": None},
+        ],
+        "figures": []
+    }
+
+    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    task = ChallengeTaskInput(
+        case_id="D-02",
+        function="Reproduction",
+        title="D-02 缺失 reference 测试",
+        input="测试 reference 为 None 或 0 时的 relative_error",
+        materials=[],
+        constraints=[],
+        expected_output="relative_error 为 None",
+        output_schema_ref="Reproduction"
+    )
+
+    result = handler.handle(task, session_id="test-session-none-ref")
+    assert result["status"] == "completed"
+    metrics = result["metrics"]
+    assert metrics[0]["relative_error"] is None
+    assert metrics[1]["relative_error"] is None
+    assert metrics[2]["relative_error"] is None
+
+
+def test_fallback_returns_none_relative_error(isolated_repro_env):
+    """验证 _fallback 降级输出中，无论是否配置预设参考值，relative_error 恒为 None"""
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    # 1. 默认无预设参考值的 case_id
+    res_default = handler._fallback("D-99", status="materials_missing")
+    assert res_default["status"] == "materials_missing"
+    for m in res_default["metrics"]:
+        assert m["observed"] is None
+        assert m["reference"] is None
+        assert m["relative_error"] is None
+
+    # 2. 配置了预设参考值场景 (3-元组)
+    handler.METRIC_SPECS["D-TEST-PRESET"] = [
+        ("Macro-F1", "分数", 85.2),
+        ("Accuracy", "%", 92.1),
+        ("运行时间", "秒", 12.5),
+    ]
+    res_preset = handler._fallback("D-TEST-PRESET", status="failed")
+    assert res_preset["status"] == "failed"
+    assert res_preset["metrics"][0]["reference"] == 85.2
+    assert res_preset["metrics"][0]["observed"] is None
+    assert res_preset["metrics"][0]["relative_error"] is None
+    assert res_preset["metrics"][1]["reference"] == 92.1
+    assert res_preset["metrics"][1]["observed"] is None
+    assert res_preset["metrics"][1]["relative_error"] is None
+    assert res_preset["metrics"][2]["reference"] == 12.5
+    assert res_preset["metrics"][2]["observed"] is None
+    assert res_preset["metrics"][2]["relative_error"] is None
+
+    # 3. 2-元组格式但包含数值预设 [(85.2, 分数), (92.1, %), (12.5, 秒)]
+    handler.METRIC_SPECS["D-TEST-TUPLE2"] = [
+        (85.2, "分数"),
+        (92.1, "%"),
+        (12.5, "秒"),
+    ]
+    res_tuple2 = handler._fallback("D-TEST-TUPLE2", status="failed")
+    assert res_tuple2["status"] == "failed"
+    assert res_tuple2["metrics"][0]["reference"] == 85.2
+    assert res_tuple2["metrics"][0]["relative_error"] is None
+    assert res_tuple2["metrics"][1]["reference"] == 92.1
+    assert res_tuple2["metrics"][1]["relative_error"] is None
+    assert res_tuple2["metrics"][2]["reference"] == 12.5
+    assert res_tuple2["metrics"][2]["relative_error"] is None
+
+
+def test_figures_empty_allowed_in_local_offline_mode():
+    """验证在本地离线模式下 (is_online=False)，figures 为 [] 时允许通过"""
+    handler = ReproductionHandler()
+    assert handler._verify_and_sync_figures("D-01", {"figures": []}, "/tmp", is_online=False) is True
+    assert handler._verify_and_sync_figures("D-01", {"figures": []}, "/tmp", is_online=True) is False
+
+

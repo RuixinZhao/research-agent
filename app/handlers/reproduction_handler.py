@@ -128,15 +128,33 @@ class ReproductionHandler(BaseHandler):
             submission_data["case_id"] = case_id
 
             # 4. 核验 PNG 图表真实性
-            if not self._verify_and_sync_figures(case_id, submission_data, work_dir):
+            if not self._verify_and_sync_figures(case_id, submission_data, work_dir, is_online=is_online):
                 logger.error(f"ReproductionHandler: Figure verification failed for {case_id}")
                 return self._fallback(case_id, status="failed")
 
-            # 5. 使用 Pydantic 模型确保结构合规
+            # 5. 计算 relative_error
+            for m in submission_data.get("metrics", []):
+                ref = m.get("reference")
+                obs = m.get("observed")
+                if ref is not None and ref != 0 and obs is not None:
+                    m["relative_error"] = abs(float(obs) - float(ref)) / abs(float(ref))
+                else:
+                    m["relative_error"] = None
+
+            # 6. 添加指标覆盖率日志
+            for m in submission_data.get("metrics", []):
+                name = m.get("name", "?")
+                ref = m.get("reference")
+                obs = m.get("observed")
+                rel = m.get("relative_error")
+                rel_str = f"{rel:.4f}" if rel is not None else "None"
+                logger.info(f"[Metric] {name}: reference={ref}, observed={obs}, relative_error={rel_str}")
+
+            # 7. 使用 Pydantic 模型确保结构合规
             validated = ReproductionOutput.model_validate(submission_data)
             final_result = validated.model_dump()
 
-            # 6. 双写落盘至队伍产物目录并回读核验
+            # 8. 双写落盘至队伍产物目录并回读核验
             rel_json_path = f"data/{self.team_name}/{case_id}.json"
             self.file_writer.write_json_and_verify(rel_json_path, final_result)
             logger.info(f"ReproductionHandler: Successfully completed reproduction for {case_id}")
@@ -186,7 +204,13 @@ class ReproductionHandler(BaseHandler):
                         pass
         return None
 
-    def _verify_and_sync_figures(self, case_id: str, submission: Dict[str, Any], work_dir: str) -> bool:
+    def _verify_and_sync_figures(
+        self,
+        case_id: str,
+        submission: Dict[str, Any],
+        work_dir: str,
+        is_online: bool = False
+    ) -> bool:
         """
         核验 PNG 图表真实性：
         1. 路径规范与实体文件存在性（若在 work 目录则同步复制到队伍公开目标目录）
@@ -196,6 +220,9 @@ class ReproductionHandler(BaseHandler):
         """
         figures = submission.get("figures", [])
         if not isinstance(figures, list) or len(figures) == 0:
+            if not is_online:
+                logger.info(f"Local offline mode with empty figures allowed for {case_id}")
+                return True
             logger.warning(f"No figures reported for {case_id}")
             return False
 
@@ -276,11 +303,42 @@ class ReproductionHandler(BaseHandler):
         metric_items = []
         specs = self.METRIC_SPECS.get(case_id)
         if specs:
-            for name, unit in specs:
+            default_names = ["Macro-F1", "Accuracy", "运行时间"]
+            for idx, spec in enumerate(specs):
+                name = None
+                unit = "unit"
+                ref = None
+
+                if isinstance(spec, (list, tuple)):
+                    if len(spec) >= 3:
+                        name = str(spec[0])
+                        unit = str(spec[1])
+                        ref = float(spec[2]) if spec[2] is not None else None
+                    elif len(spec) == 2:
+                        if isinstance(spec[0], (int, float)):
+                            ref = float(spec[0])
+                            unit = str(spec[1])
+                            name = default_names[idx] if idx < len(default_names) else f"Metric_{idx+1}"
+                        else:
+                            name = str(spec[0])
+                            unit = str(spec[1])
+                            ref = None
+                    elif len(spec) == 1:
+                        name = str(spec[0])
+                        unit = "unit"
+                        ref = None
+                elif isinstance(spec, dict):
+                    name = spec.get("name")
+                    unit = spec.get("unit", "unit")
+                    ref = spec.get("reference")
+
+                if not name:
+                    name = f"Metric_{idx+1}"
+
                 metric_items.append({
                     "name": name,
                     "unit": unit,
-                    "reference": None,
+                    "reference": ref,
                     "observed": None,
                     "relative_error": None
                 })

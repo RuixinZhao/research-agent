@@ -191,11 +191,19 @@ class FactAuditor:
     ) -> str:
         """
         一站式端到端审计与转译：
-        1. 转译机器预锚定标签 -> [X, p.Y]
-        2. 反向原子事实核验与疑似幻觉数值保守降级
+        1. 若证据管理器中无注册证据卡片（零引用模式），直接剔除任何残留锚点或引用标记并返回纯净文本，彻底杜绝 -2H 引文幻觉
+        2. 若有证据卡片，转译机器预锚定标签 -> [X, p.Y] 并进行反向原子事实核验与疑似幻觉数值保守降级
         """
+        if not evidence_manager.cards:
+            # 零引用模式：清理任何机器锚点或自编中括号引用，杜绝 -2H 引文幻觉
+            cleaned = self.ANCHOR_PATTERN.sub("", raw_markdown)
+            cleaned = self.STANDARD_CITE_PATTERN.sub("", cleaned)
+            cleaned = re.sub(r"\[\d+\]", "", cleaned)
+            return cleaned
+
         # 第一阶段：锚点转译与物理页对齐
         translated = self.translate_machine_anchors(raw_markdown, evidence_manager)
         # 第二阶段：数值反向核验与降级重写
         sanitized = self.audit_and_soften_hallucinations(translated, evidence_manager)
         return sanitized
+
