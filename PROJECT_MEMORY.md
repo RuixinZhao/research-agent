@@ -120,6 +120,74 @@
 ### 5.4 修复与改动记录
 * 原 `Dockerfile` 与 `requirements.txt` 配置完全契合生产标准（无冲突无报错），构建与运行一次性全部通过验证，无需额外修补。
 
+---
+
+## 六、最终集成状态与发布记录 (Final Integration Status)
+
+> **集成时间**：2026-10-16 20:22  
+> **验证专家**：QA 工程师兼技术整合专家  
+> **分支状态**：`dev` 已完整验证并无快进合并（`--no-ff`）至 `main` 分支  
+> **生产发布 Tag**：`v1.1.0`（GitHub 远程已同步发布）  
+> **Main 分支 Commit**：`3c8264723d5af238b07d42e058c1aa6de5dcb85e`  
+
+### 6.1 Live DeepSeek 真实端到端生成验证
+
+#### 1. E 类灵感方案报告 (IdeaHandler - `scripts/live_test_e.py`)
+* **真实端到端耗时**：`18.6s`（远低于 90s 超时上限）
+* **生成字数规模**：`5608` 字符（严格满足 $\ge 800$ 字符契约，达标率 701%）
+* **8 大二级标题槽位覆盖率**：`100%`（`missing_slots = []`，8 大核心槽位全覆盖）
+  1. `## 1. 研究动机与问题背景` ✅
+  2. `## 2. 核心Idea与技术路线` ✅
+  3. `## 3. 实验方案与消融设计` ✅
+  4. `## 4. 基准数据集与数据特征` ✅
+  5. `## 5. 量化评价指标体系` ✅
+  6. `## 6. 复现瓶颈与观察边界反思` ✅
+  7. `## 7. 多篇文献互补与协同机制` ✅
+  8. `## 8. 场景可行性、约束与失败边界` ✅
+* **证据边界硬隔离验证**：
+  * **第 6 槽含模拟观察措辞**：✅ `True`（显式包含“待分析验证现象而非原论文结论”，建立不可逾越的证据防火墙）
+  * **第 6 槽含确定性陈述**：❌ `False`（杜绝“实验证明”、“结果表明”等高危断言，防止被判证据混淆）
+
+#### 2. A 类科研对话与范围限定 (ChatHandler - `scripts/live_test_a.py`)
+* **场景 1（LoRA 学术科研机理解答）**：
+  * **回答长度**：`276` 字符（严格控制在 150~300 字高密度学术解答区间）
+  * **学术质量**：深度剖析低秩分解数学公式、本征维度流形假设、零推理延迟优势与秩 $r$ 上界约束，高度严谨。
+* **场景 2（写诗非科研请求范围限定）**：
+  * **范围限定触发**：✅ `True`
+  * **边界限定措辞**：检出 `['科研助手', '超出', '专业范围', '无法']`
+  * **防护表现**：坚决拒绝直接写诗，明确阐明专职科研助手职责边界，并自适应转入计算语言学/NLP 受约束文本生成的学术机理解析与变量范围限定追问。
+
+### 6.2 全量集成测试回归报告
+
+* **测试命令**：`PYTHONPATH=. pytest tests/ -v`
+* **测试用例总数**：`38 passed, 0 failed, 0 errors`（100% PASS，耗时 14.18s）
+* **覆盖范围**：
+  * A/E 处理器：U 型文献注意力布局、模拟观察物理隔离框、槽位自动补全与双写一致性
+  * D 类复现与熔断：离线 D01~D05 流程、熔断器状态流转、相对误差计算（`relative_error` 双值存在与空值防御）、空 figures 本地离线宽容
+  * C/B 类文献与检索：C 类零 PDF 降级模式（死守 $H=0$）、B 类对抗性排他检索防火墙（死守 $U=0$）
+  * Docker 与基准预检：Dockerfile/依赖声明、提交校验器正确性与报错捕获、Mock 网关生命周期
+  * Server 端到端 HTTP 接口：`POST /solve` 与 `GET /health`
+
+### 6.3 发布与合并记录
+* **Dev 分支提交**：`808ad7d` (feat: enforce out-of-scope boundary firewall & bulletproof slot 6 disclaimer)
+* **Main 分支合并**：`3c82647` (`merge(dev→main): SOTA anti-hallucination pipeline complete...`)
+* **Git Tag**：`v1.1.0` 已同步推送至远程 `origin/v1.1.0`
+
+### 6.4 下一步行动项 (Next Actions)
+1. **Docker 镜像打包固化**：
+   ```bash
+   docker build --platform linux/amd64 -t research-agent:v1.1.0 .
+   docker save research-agent:v1.1.0 -o submission_research_agent_v1.1.0.tar
+   ```
+2. **提交前终检验收清单 (Final Submission Checklist)**：
+   - [x] 代码库全量 38 项 pytest 测试 100% 绿灯
+   - [x] Dockerfile 采用非 root `agent` (uid=1000) 运行
+   - [x] 内存常驻峰值 $< 90$ MiB，远低于 1024 MiB 限额
+   - [x] Live DeepSeek API 实测 E 类与 A 类双向验收标准全达标
+   - [x] C 类无 PDF 场景死守 $H=0$，B 类对抗排他死守 $U=0$
+   - [x] main 分支已就绪，v1.1.0 tag 已发布
+
+
 
 
 
