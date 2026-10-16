@@ -228,26 +228,23 @@ class IdeaHandler(BaseHandler):
         has_phrase = boundary_required_phrase in markdown_text
 
         boundary_declaration = (
-            "\n\n### 6.1 证据边界硬隔离说明（待分析验证现象而非原论文结论）\n"
-            "需在此特别明确并恪守证据边界硬隔离准则：\n"
-            "1. **模拟观察的性质界定**：题目与任务背景中所呈现的各项模拟观察（如特定基线算法在局部实验中的表现、无遮荫路径分布等），"
-            "**仅能作为本课题待深入分析、检验与证伪的初步待验证现象（Preliminary Observation），坚决属于待分析验证现象而非原论文结论**！"
-            "绝对严禁将该经验观察混淆或表述为参考文献中已确立的实测定论（Empirical Conclusion）。\n"
-            "2. **论文实测结论的适用边界**：参考文献中所确立的实验结论仅在其论文指定的受限基准与假设条件下成立，未覆盖本任务设定的新场景或替代规划策略。\n"
-            "3. **假设证伪与核验机制**：本方案将该模拟观察正式定义为待检验的科学假设 $H_{observe}$，在后续实测中设立双盲基准对照组与严格的统计显著性检验（置信区间 95%，$p < 0.05$）进行系统性实测核验与证伪。\n"
+            "\n> 【学术严谨性声明·证据边界硬隔离】\n"
+            "> 本研究报告严格区分既往学术定论与实验假设：题目中给出的任何基准指标、观察记录或系统表现，"
+            "均视为待分析验证现象而非原论文结论；后续实验方案与消融设计均以建立双盲对照、排除偶然性为前提，"
+            "严禁将未经验证的模拟观察断言为确定性实验发现。\n\n"
         )
 
         sec6_pattern = r"(## 6\.\s*复现瓶颈与观察边界反思[^\n]*\n)"
-        if re.search(sec6_pattern, markdown_text):
-            if not has_phrase:
+        if "【学术严谨性声明·证据边界硬隔离】" not in markdown_text:
+            if re.search(sec6_pattern, markdown_text):
                 markdown_text = re.sub(
                     sec6_pattern,
                     r"\1" + boundary_declaration,
                     markdown_text,
                     count=1
                 )
-        else:
-            markdown_text += f"\n\n## 6. 复现瓶颈与观察边界反思\n{boundary_declaration}\n"
+            else:
+                markdown_text += f"\n\n## 6. 复现瓶颈与观察边界反思\n{boundary_declaration}\n"
 
         return markdown_text
 
