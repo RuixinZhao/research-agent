@@ -1,9 +1,11 @@
 import os, sys
+from dotenv import load_dotenv
+
+load_dotenv()
 sys.path.insert(0, "/Users/zhaoruixin/Desktop/research-agent")
 
-os.environ['CHALLENGE_LLM_BASE_URL'] = 'https://api.deepseek.com/v1'
-os.environ['CHALLENGE_LLM_API_KEY'] = 'sk-REDACTED-DEEPSEEK-KEY'
-os.environ['CHALLENGE_LLM_MODEL'] = 'deepseek-chat'
+os.environ.setdefault('CHALLENGE_LLM_BASE_URL', os.getenv('CHALLENGE_LLM_BASE_URL', 'https://api.deepseek.com/v1'))
+os.environ.setdefault('CHALLENGE_LLM_MODEL', os.getenv('CHALLENGE_LLM_MODEL', 'deepseek-chat'))
 
 from app.handlers.chat_handler import ChatHandler
 from app.schemas.task import ChallengeTaskInput
