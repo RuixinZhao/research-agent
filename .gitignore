@@ -17,6 +17,7 @@ venv/
 # Large Docker & Tar Archives (GitHub 100MB single-file limit)
 *.tar
 *.tar.gz
+*.zip
 agenthack-base-*.tar
 agenthack-base-*.tar.gz
 

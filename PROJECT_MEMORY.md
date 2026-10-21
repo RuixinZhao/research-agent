@@ -1,11 +1,12 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.0.0 (Living Document)  
-> **最后更新**：2026-10-13  
+> **版本**：v1.1.1 (Living Document)  
+> **最后更新**：2026-10-16  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
 > **说明**：**本文档是所有开发会话（Sessions / Subagents）的唯一中枢真相源（Single Source of Truth）**。任何新会话或子 Agent 启动时，必须首先完整阅读本文档以对齐全局认知。
+
 
 ---
 
@@ -186,6 +187,88 @@
    - [x] Live DeepSeek API 实测 E 类与 A 类双向验收标准全达标
    - [x] C 类无 PDF 场景死守 $H=0$，B 类对抗排他死守 $U=0$
    - [x] main 分支已就绪，v1.1.0 tag 已发布
+
+---
+
+## 七、v1.1.1 AGY-Research Studio 前端具象化控制台交付
+
+> **完成时间**：2026-10-16 20:44  
+> **核心使命**：为全套科研助手 Agent 工具打造高质感、交互式、且全方位具象化展现的多智能体智能控制台与可视化大盘（Research Agent Studio）。
+
+### 7.1 前端具象化五大功能看板
+1. **Agent 架构全景拓扑 (Architecture Topology)**：五大专项 Agent（Chat, Retrieval, Survey, Reproduction, Idea）与底层安全基础设施（SQLite FTS5、PyMuPDF、PaperQA2 证据链、RefChecker 双重审计、150s 熔断保护）动态交互拓扑与时序流。
+2. **任务推演与交互工作台 (Task Playground)**：支持一键加载 25 道基准赛题或自定义输入题目，动态展示 5 大阶段时序流动效（题目解析 ➔ 物理页检索 ➔ 学术推理/复现 ➔ 事实审计 ➔ 双写核验）。
+3. **多模态成果阅览器 (Artifact Viewer)**：
+   - **C类/E类成果**：Markdown 深度排版、实时字数统计徽章（$\ge 800$ 字）、**可交互物理页码引文徽章**（点击即可弹出真实物理页证据溯源浮层）、8 大核心二级标题覆盖率雷达、模拟观察待验证证据隔离区警示框；
+   - **D类复现成果**：真实生成的 PNG 实验曲线图（魔数绿标 `89 50 4E 47` 验真）、Observed vs Reference 指标对比卡片与误差分析；
+   - **A类学术对话**：学术机理解析卡片 + 变量范围限定澄清追问；
+   - **B类排他检索**：命中文献列表 + 排他规则拦截日志。
+4. **100分基准评测大盘 (Benchmark 100 Pts Radar)**：100 分总分看板（D类40分、C类25分、B类15分、E类15分、A类5分）、5x5 矩阵全景卡片、内置一键触发自动化预检流水线（`validate_submission.py` 100% PASS 徽章）。
+5. **文献资产库 (Paper Explorer)**：直观浏览 11 篇顶会论文元数据与物理页切片分布。
+
+### 7.2 技术指标与自动化回归测试
+* **技术栈**：FastAPI 轻量异步挂载 + 原生现代 ES6 + TailwindCSS + Lucide Icons + Marked.js + Chart.js 单页应用（零打包编译依赖，开箱即用）。
+* **自动化测试**：新增 `tests/test_web_visualizer.py`（9 项专项测试），全量回归测试 `PYTHONPATH=. pytest tests/ -q` 达到 **45 passed / 45 passed (100% PASS)**。
+* **资源开销**：单进程常驻内存仅 68.77 MiB，HTTP 响应延迟 $< 5$ms，完全符合 1024 MiB 内存受限沙箱契约。
+
+---
+
+## 八、v1.1.2 D-02 与 D-05 离线参考算法与评测验证
+
+> **完成时间**：2026-10-21 19:43  
+> **核心使命**：按官方 layered-d-v3 规范完整实现 D-02（检索超参选择与排序）与 D-05（加权公平事件驱动调度仿真）参考实现，建立本地离线验证与守恒性校验机制。
+
+### 8.1 D-02 BM25 超参选择与双阶段排序 (d_implementations/D-02-implementation.py)
+* **分词与统计**：正文与标题独立建库，分词正则 `[a-z0-9]+`，字段平均长度为 0 时按 1 处理。
+* **打分与排序**：$\text{Total Score} = \text{Score}_{text} + \text{title\_weight} \times \text{Score}_{title}$，共用 $k1, b$。所有文档按 $(-score, id)$ 升序排列。
+* **选参策略**：网格搜索 27 组超参，优先级依次为：`worst_mrr_at_10` 最大 ➔ `macro_mrr_at_10` 最大 ➔ `macro_recall_at_5_percent` 最大（前 3 项比较前四舍五入至 12 位小数）➔ `title_weight, k1, b` 升序。
+* **阶段区分**：
+  - `phase="run"`：返回 `baseline`、`candidate` 及 `details.selected/search`（包含每组 `group_metrics`）；
+  - `phase="rank"`：直接使用输入 `data.selected` 对测试集排序，绝不重复选参。
+* **离线验证**：`公开样例请求/D-02.json`（run 阶段）与 `公开样例请求/D-02/rank-default.json`（rank 阶段）100% 验证通过。
+
+### 8.2 D-05 离散事件驱动公平调度仿真 (d_implementations/D-05-implementation.py)
+* **状态机流转时序**：非抢占事件驱动架构。同一时刻严格执行：
+  1. 释放已完成任务的服务端；
+  2. 纳入 `arrival <= now` 的新到达任务；
+  3. 丢弃 `deadline <= now` 的超时等待任务；
+  4. 空闲服务端按编号升序派发任务。
+* **调度策略与流切换**：
+  - **FIFO**：按 `(arrival_ms, id)` 最小出队；
+  - **Fair**：按 `(allocated_service / flow_weight, arrival_ms, id)` 最小出队，一旦派发立即计入预留服务量；
+  - **开销与淘汰**：跨流切换加收 `setup_ms`；$start \ge deadline$ 丢弃为 `deadline`；$end > horizon$ 丢弃为 `horizon`；$end == horizon$ 允许完成。
+* **任务守恒定律断言**：
+  `set(t['id'] for t in trace) | set(d['id'] for d in dropped) == set(t['id'] for t in all_tasks)` 且两者交集为空，不重不漏。
+* **指标公式核验**：Jain 公平性指数（包含零服务流）、归一化吞吐（仅有效服务，开销不计）、平均等待时间（仅完成任务）严格对齐 method.md。
+* **回归测试**：全量测试套件达 **52 passed / 52 passed (100% PASS)**。
+
+
+---
+
+## 八、v1.1.2 D 类复现算法标准化与 D-01 纯标准库黄金实现
+
+> **完成时间**：2026-10-21  
+> **核心使命**：针对 D 类实验复现任务 D-01（多条件文本分类复现），实现 100% 严谨且纯 Python 3.9 标准库的黄金算法，支持全批量梯度下降 Softmax 分类与严密边界条件防御。
+
+### 8.1 算法实现要点
+1. **纯标准库实现**：严格仅依赖 `math`, `re`, `collections`（零外部库依赖，支持 Python 3.9+）。
+2. **分词与词表拟合**：采用小写正则 `[a-z0-9]+`，词表及 IDF 仅在当前条件的训练集上拟合，词表按字典序排序；IDF 公式：$IDF(t) = 1.0 + \ln((1 + N) / (1 + df(t)))$。
+3. **特征工程与归一化**：raw TF 乘以 IDF，执行 L2 归一化；末尾追加 bias=1.0（最后一维）；空文本或全生词保留纯 bias 向量。
+4. **多分类 Softmax 模型与优化**：类别按字典序排列，权重矩阵零初始化；全批量梯度下降 $W \leftarrow W - lr \times (\text{数据梯度和} / N + penalty \times W)$（含 bias 正则化）。
+5. **严密并列仲裁**：候选预测与多数类基线预测在并列时均遵循类别字典序最小规则。
+6. **边界条件与无 NaN 保证**：针对空字符串、完全生词、单类别训练集、空集等全边界输入完成测试，`json.dumps(..., allow_nan=False)` 100% 通过。
+
+### 8.2 黄金代码沉淀与 LLM 代码生成实测
+* **标准实现归档**：
+  - `d_implementations/D-01-implementation.py`
+  - `research-experiments-v1/D-01/implementation_candidate.py`
+  - `research-experiments-v1/D-01/implementation_verified.py`
+* **DeepSeek 模型测试与比对**：
+  - 测试脚本：`tests/test_d01_llm_codegen.py`
+  - 集成 AST 语法校验、非标准库 import 防火墙、公开样例与边界样例全流程自动化测试。
+  - 全量回归测试通过率：**52 passed / 52 passed (100% PASS)**。
+
+
 
 
 
