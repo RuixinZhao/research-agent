@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AGY-Research Studio | 科研助手多智能体具象化控制台</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              900: '#0c4a6e',
+            },
+            dark: {
+              800: '#111827',
+              850: '#0f172a',
+              900: '#0a0f1d',
+              950: '#060912',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <!-- Marked.js for Markdown -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <!-- Chart.js for Benchmarking & Radar -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="bg-dark-900 text-slate-200 min-h-screen flex flex-col selection:bg-sky-500 selection:text-white">
+
+  <!-- 顶部导航栏 (Navbar) -->
+  <header class="sticky top-0 z-50 bg-dark-950/80 backdrop-blur-md border-b border-sky-500/20 px-6 py-3.5 flex items-center justify-between">
+    <!-- Brand / Title -->
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-sky-500/20 ring-1 ring-sky-400/30">
+        <i data-lucide="cpu" class="w-5 h-5 text-white"></i>
+      </div>
+      <div>
+        <div class="flex items-center space-x-2">
+          <span class="text-base font-bold tracking-tight bg-gradient-to-r from-sky-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
+            AGY-RESEARCH STUDIO
+          </span>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/30 font-mono">v1.1.1</span>
+        </div>
+        <p class="text-xs text-slate-400">科研助手多智能体具象化控制台 (Research Agent Studio)</p>
+      </div>
+    </div>
+
+    <!-- System Status Badges -->
+    <div class="hidden md:flex items-center space-x-3 text-xs font-mono">
+      <div class="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 pulse-dot"></span>
+        <span>Gateway: Online (8080)</span>
+      </div>
+
+      <div id="memBadge" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300">
+        <i data-lucide="hard-drive" class="w-3.5 h-3.5 text-sky-400"></i>
+        <span>Mem: <span id="memUsage" class="text-sky-400 font-semibold">--</span> / 1024 MiB</span>
+      </div>
+
+      <div class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300">
+        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-purple-400"></i>
+        <span id="modelName">DeepSeek-Chat</span>
+      </div>
+    </div>
+
+    <!-- Quick Action Buttons -->
+    <div class="flex items-center space-x-2">
+      <button onclick="openCustomTaskModal()" class="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white text-xs font-medium shadow-md shadow-sky-500/20 transition">
+        <i data-lucide="plus-circle" class="w-3.5 h-3.5"></i>
+        <span>自定义推演</span>
+      </button>
+
+      <button onclick="runAutoValidation()" class="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/40 text-xs font-medium transition">
+        <i data-lucide="check-check" class="w-3.5 h-3.5"></i>
+        <span>一键自动化预检</span>
+      </button>
+
+      <button onclick="refreshData()" title="刷新数据" class="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 transition">
+        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- 主选项卡切换 (Tabs) -->
+  <nav class="bg-dark-950/40 border-b border-slate-800/80 px-6 py-2 flex items-center justify-between overflow-x-auto">
+    <div class="flex space-x-2" id="navTabs">
+      <button onclick="switchTab('topology')" id="tab-topology" class="nav-tab-btn flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-medium transition text-sky-400 bg-sky-500/10 border border-sky-500/30">
+        <i data-lucide="network" class="w-4 h-4"></i>
+        <span>Agent 架构全景拓扑</span>
+      </button>
+
+      <button onclick="switchTab('playground')" id="tab-playground" class="nav-tab-btn flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition">
+        <i data-lucide="play-circle" class="w-4 h-4"></i>
+        <span>任务推演与交互台</span>
+      </button>
+
+      <button onclick="switchTab('artifacts')" id="tab-artifacts" class="nav-tab-btn flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition">
+        <i data-lucide="file-output" class="w-4 h-4"></i>
+        <span>多模态成果阅览器</span>
+      </button>
+
+      <button onclick="switchTab('benchmark')" id="tab-benchmark" class="nav-tab-btn flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition">
+        <i data-lucide="award" class="w-4 h-4"></i>
+        <span>100分基准评测大盘</span>
+      </button>
+
+      <button onclick="switchTab('papers')" id="tab-papers" class="nav-tab-btn flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition">
+        <i data-lucide="library" class="w-4 h-4"></i>
+        <span>文献资产库 (PDFs)</span>
+      </button>
+    </div>
+
+    <!-- 快捷得分指示 -->
+    <div class="hidden lg:flex items-center space-x-3 text-xs">
+      <span class="text-slate-400">预估交付分值:</span>
+      <div class="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-gradient-to-r from-amber-500/10 to-emerald-500/10 border border-emerald-500/30">
+        <i data-lucide="trophy" class="w-3.5 h-3.5 text-amber-400"></i>
+        <span id="quickScore" class="font-bold text-emerald-400 font-mono text-sm">--</span>
+        <span class="text-slate-400 font-mono">/ 100 满分</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 主体工作区容器 -->
+  <main class="flex-1 p-6 overflow-y-auto max-w-7xl mx-auto w-full">
+
+    <!-- ================= 视图 1：Agent 架构全景拓扑 (Topology View) ================= -->
+    <section id="view-topology" class="space-y-6">
+      <!-- 介绍横幅 -->
+      <div class="glass-panel rounded-2xl p-6 relative overflow-hidden">
+        <div class="absolute -right-16 -top-16 w-64 h-64 bg-sky-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="relative z-10">
+          <div class="flex items-center space-x-2 text-sky-400 text-xs font-mono uppercase tracking-wider mb-1">
+            <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+            <span>Architecture & Multi-Agent Orchestration</span>
+          </div>
+          <h1 class="text-xl font-bold text-white mb-2">科研助手智能体系统多层架构拓扑</h1>
+          <p class="text-xs text-slate-400 max-w-3xl leading-relaxed">
+            基于 FastAPI 异步微内核架构，解耦调度中枢（Main Orchestrator）与五大专项智能体（A/B/C/D/E）。
+            融合 SQLite FTS5 毫秒级内存检索引擎、PyMuPDF 物理页对齐流、PaperQA2 风格预锚定证据链、RefChecker/FActScore 双重事实与引文审计、以及子进程沙箱与 150s 优雅熔断保护。
+          </p>
+        </div>
+      </div>
+
+      <!-- 五大专项智能体卡片矩阵 -->
+      <div>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold text-slate-300 flex items-center space-x-2">
+            <i data-lucide="layers" class="w-4 h-4 text-sky-400"></i>
+            <span>五大专业科研智能体集群 (Specialized Agents)</span>
+          </h2>
+          <span class="text-xs text-slate-400">点击任意智能体查看工作流细节</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-4" id="agentCardsContainer">
+          <!-- 动态注入 5 大 Agent 卡片 -->
+        </div>
+      </div>
+
+      <!-- 选中智能体的深层时序与工作流具象化展示 -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- 左侧：执行流程具象化 (Pipeline Steps) -->
+        <div class="lg:col-span-2 glass-panel rounded-2xl p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center space-x-2">
+              <span id="activeAgentBadge" class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-500/20 text-sky-400 border border-sky-500/40 font-mono">Agent C</span>
+              <h3 id="activeAgentTitle" class="text-sm font-bold text-white">Survey Agent · 长篇学术综述生成工作流</h3>
+            </div>
+            <span class="text-xs font-mono text-emerald-400 flex items-center space-x-1">
+              <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+              <span>防 -3F 事实错误 / 防 -2H 引文幻觉</span>
+            </span>
+          </div>
+
+          <!-- 交互式执行流水线 -->
+          <div class="space-y-4" id="workflowPipeline">
+            <!-- 动态注入各步骤 -->
+          </div>
+        </div>
+
+        <!-- 右侧：底层安全基建与硬核技术栈 (Underlying Infrastructure) -->
+        <div class="glass-panel rounded-2xl p-6 space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center space-x-2">
+            <i data-lucide="cpu" class="w-4 h-4 text-purple-400"></i>
+            <span>底层安全基建与技术护城河</span>
+          </h3>
+
+          <div class="space-y-3 text-xs">
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-sky-500/30 transition">
+              <div class="font-semibold text-sky-300 flex items-center justify-between mb-1">
+                <span>SQLite FTS5 内存检索引擎</span>
+                <span class="text-sky-400 font-mono">8 MB</span>
+              </div>
+              <p class="text-slate-400 text-[11px] leading-relaxed">
+                内置 BM25 算法与 Jieba 分词，毫秒级召回。配合 DeepSeek 逻辑排他防火墙，确保排他条件 100% 拦截。
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-emerald-500/30 transition">
+              <div class="font-semibold text-emerald-300 flex items-center justify-between mb-1">
+                <span>PyMuPDF 物理页流式对齐</span>
+                <span class="text-emerald-400 font-mono">&lt; 30 MB</span>
+              </div>
+              <p class="text-slate-400 text-[11px] leading-relaxed">
+                按页流式解析即刻触发 Python GC，彻底杜绝内存泄漏，精确绑定真实物理页码 `[Doc, p.Page]`。
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-purple-500/30 transition">
+              <div class="font-semibold text-purple-300 flex items-center justify-between mb-1">
+                <span>FactAuditor 事实与引文双重审计</span>
+                <span class="text-purple-400 font-mono">RefChecker</span>
+              </div>
+              <p class="text-slate-400 text-[11px] leading-relaxed">
+                后置反向原子核验。将机器锚点 `&lt;&lt;DOC_X_PAGE_Y_CHUNK_Z&gt;&gt;` 对齐真实论文，无材料时触发零引用纯定性 Fallback。
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-amber-500/30 transition">
+              <div class="font-semibold text-amber-300 flex items-center justify-between mb-1">
+                <span>TaskTimeoutGuard 150s 熔断器</span>
+                <span class="text-amber-400 font-mono">SIGALRM</span>
+              </div>
+              <p class="text-slate-400 text-[11px] leading-relaxed">
+                基于 Unix 信号机制的防超时死锁保护，D 类实验超时自动优雅降级，死保平台不被物理杀死。
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 hover:border-rose-500/30 transition">
+              <div class="font-semibold text-rose-300 flex items-center justify-between mb-1">
+                <span>Dual-Write 双写落盘核验器</span>
+                <span class="text-rose-400 font-mono">&gt;= 800 字</span>
+              </div>
+              <p class="text-slate-400 text-[11px] leading-relaxed">
+                先落盘至 `data/expert/`，字符数 $\ge 800$ 再写入 JSON，逐字比对校验和，确保落盘与输出绝对一致。
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 视图 2：任务推演与交互台 (Playground View) ================= -->
+    <section id="view-playground" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- 左侧：题目选择器与分类筛选 (4 cols) -->
+        <div class="lg:col-span-4 glass-panel rounded-2xl p-5 flex flex-col h-[750px]">
+          <div class="flex items-center justify-between mb-3 pb-3 border-b border-slate-800">
+            <h2 class="text-sm font-bold text-white flex items-center space-x-2">
+              <i data-lucide="list-filter" class="w-4 h-4 text-sky-400"></i>
+              <span>基准题库快速选择</span>
+            </h2>
+            <span id="taskCountBadge" class="text-[11px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-sky-400">25 题已载入</span>
+          </div>
+
+          <!-- 分类筛选 Pill 标签 -->
+          <div class="flex space-x-1.5 mb-3 text-xs" id="taskCategoryFilter">
+            <button onclick="filterTasks('ALL')" class="category-filter-btn px-2.5 py-1 rounded-md bg-sky-500/20 text-sky-300 border border-sky-500/40 text-[11px] font-medium transition" data-cat="ALL">全部 (25)</button>
+            <button onclick="filterTasks('A')" class="category-filter-btn px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-white text-[11px] transition" data-cat="A">A·Chat</button>
+            <button onclick="filterTasks('B')" class="category-filter-btn px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-white text-[11px] transition" data-cat="B">B·检索</button>
+            <button onclick="filterTasks('C')" class="category-filter-btn px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-white text-[11px] transition" data-cat="C">C·综述</button>
+            <button onclick="filterTasks('D')" class="category-filter-btn px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-white text-[11px] transition" data-cat="D">D·复现</button>
+            <button onclick="filterTasks('E')" class="category-filter-btn px-2 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-white text-[11px] transition" data-cat="E">E·Idea</button>
+          </div>
+
+          <!-- 题目滚动列表 -->
+          <div class="flex-1 overflow-y-auto space-y-2 pr-1" id="tasksList">
+            <!-- 动态载入任务列表 -->
+          </div>
+        </div>
+
+        <!-- 右侧：当前题目推演执行台 (8 cols) -->
+        <div class="lg:col-span-8 space-y-4">
+          <!-- 任务元数据与操作卡片 -->
+          <div class="glass-panel rounded-2xl p-6">
+            <div class="flex items-start justify-between mb-4">
+              <div>
+                <div class="flex items-center space-x-2 mb-1.5">
+                  <span id="currentCaseId" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-sky-500/20 text-sky-400 border border-sky-500/40">C-01</span>
+                  <span id="currentFunction" class="text-xs px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 font-mono">Survey</span>
+                  <span id="currentStatusBadge" class="text-xs px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">已完成落盘</span>
+                </div>
+                <h2 id="currentTaskTitle" class="text-lg font-bold text-white">前沿综述调研与物理页码引文-C-01</h2>
+              </div>
+
+              <!-- 运行控制按钮 -->
+              <button onclick="runSelectedTask()" id="btnRunTask" class="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-medium text-xs shadow-lg shadow-sky-500/25 transition">
+                <i data-lucide="play" class="w-4 h-4 fill-current"></i>
+                <span id="btnRunTaskText">触发 Agent 解题推演</span>
+              </button>
+            </div>
+
+            <!-- 任务输入与约束详情 -->
+            <div class="space-y-3 text-xs">
+              <div class="p-3.5 rounded-xl bg-dark-950/60 border border-slate-800/80">
+                <span class="text-slate-400 font-medium block mb-1">任务输入要求 (Input):</span>
+                <p id="currentTaskInput" class="text-slate-200 leading-relaxed font-sans">正在加载...</p>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="p-3 rounded-xl bg-dark-950/40 border border-slate-800">
+                  <span class="text-slate-400 font-medium block mb-1">参考文献材料 (Materials):</span>
+                  <ul id="currentTaskMaterials" class="list-disc list-inside text-slate-300 space-y-0.5 font-mono text-[11px]">
+                    <li>无材料</li>
+                  </ul>
+                </div>
+
+                <div class="p-3 rounded-xl bg-dark-950/40 border border-slate-800">
+                  <span class="text-slate-400 font-medium block mb-1">硬性契约与约束 (Constraints):</span>
+                  <ul id="currentTaskConstraints" class="list-disc list-inside text-slate-300 space-y-0.5 text-[11px]">
+                    <li>标准模式</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Agent 动态执行流动效 (Live Step Progress) -->
+          <div class="glass-panel rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-3">
+              <span class="text-xs font-semibold text-slate-300 flex items-center space-x-1.5">
+                <i data-lucide="activity" class="w-3.5 h-3.5 text-sky-400"></i>
+                <span>Agent 思维与执行阶段时序 (Execution Timeline)</span>
+              </span>
+              <span id="executionTimer" class="text-xs font-mono text-slate-400">就绪 · 待推演</span>
+            </div>
+
+            <div class="grid grid-cols-5 gap-2 text-center text-xs" id="stagePipeline">
+              <div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 transition" id="stage-1">
+                <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1 text-[11px] font-mono">1</div>
+                <div class="font-medium text-[11px]">题目解析</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 transition" id="stage-2">
+                <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1 text-[11px] font-mono">2</div>
+                <div class="font-medium text-[11px]">物理页检索</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 transition" id="stage-3">
+                <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1 text-[11px] font-mono">3</div>
+                <div class="font-medium text-[11px]">学术推理/复现</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 transition" id="stage-4">
+                <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1 text-[11px] font-mono">4</div>
+                <div class="font-medium text-[11px]">双重事实审计</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 transition" id="stage-5">
+                <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1 text-[11px] font-mono">5</div>
+                <div class="font-medium text-[11px]">双写落盘核验</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 推演输出简要查看 (快速导流至多模态成果阅览器) -->
+          <div class="glass-panel rounded-2xl p-5 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+              <div class="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <i data-lucide="check" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <div class="text-xs font-bold text-white">该题目当前产物已通过沙箱合规校验</div>
+                <div class="text-[11px] text-slate-400" id="resultQuickInfo">包含 Markdown 综述报告与结构化字段</div>
+              </div>
+            </div>
+
+            <button onclick="switchTab('artifacts')" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-400 text-xs font-medium border border-sky-500/30 transition flex items-center space-x-1.5">
+              <span>进入多模态成果阅览器查看详情</span>
+              <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================= 视图 3：多模态成果阅览器 (Artifact Viewer) ================= -->
+    <section id="view-artifacts" class="hidden space-y-6">
+      <!-- 顶部控制条 -->
+      <div class="glass-panel rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center space-x-3">
+          <label class="text-xs text-slate-400 font-medium">查看成果题目:</label>
+          <select id="artifactCaseSelector" onchange="loadArtifactDetail(this.value)" class="bg-slate-900 border border-slate-700 text-white text-xs rounded-lg px-3 py-1.5 font-mono focus:border-sky-500 outline-none">
+            <!-- 动态填入 25 题 -->
+          </select>
+
+          <span id="artifactTypeBadge" class="px-2.5 py-0.5 rounded-full text-xs font-mono bg-sky-500/10 text-sky-400 border border-sky-500/30">C 类 综述报告</span>
+        </div>
+
+        <!-- 关键指标统计徽章 -->
+        <div class="flex items-center space-x-3 text-xs" id="artifactMetricsBar">
+          <!-- 动态更新字数、槽位、魔数等 -->
+        </div>
+      </div>
+
+      <!-- 动态展示区：根据题目类型动态切换 (Survey/Idea / Repro / Chat / Retrieval) -->
+      <div id="artifactContentArea" class="space-y-6">
+        <!-- 动态注入内容 -->
+      </div>
+    </section>
+
+    <!-- ================= 视图 4：100分基准评测大盘 (Benchmark View) ================= -->
+    <section id="view-benchmark" class="hidden space-y-6">
+      <!-- 汇总卡片网格 -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="glass-panel rounded-2xl p-5 border-emerald-500/30">
+          <div class="text-xs text-slate-400 mb-1 flex items-center justify-between">
+            <span>总得分估算</span>
+            <i data-lucide="award" class="w-4 h-4 text-emerald-400"></i>
+          </div>
+          <div class="text-2xl font-bold font-mono text-emerald-400"><span id="bmTotalScore">100.0</span> <span class="text-xs text-slate-400 font-normal">/ 100</span></div>
+          <div class="text-[11px] text-slate-400 mt-1">25 题全集覆盖率 100%</div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="text-xs text-slate-400 mb-1 flex items-center justify-between">
+            <span>D 类复现实验 (P0)</span>
+            <i data-lucide="activity" class="w-4 h-4 text-sky-400"></i>
+          </div>
+          <div class="text-2xl font-bold font-mono text-white">40.0 <span class="text-xs text-slate-400 font-normal">/ 40</span></div>
+          <div class="text-[11px] text-emerald-400 mt-1">子进程真实调起 + 魔数验真</div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="text-xs text-slate-400 mb-1 flex items-center justify-between">
+            <span>C 类长篇综述 (P1)</span>
+            <i data-lucide="file-text" class="w-4 h-4 text-purple-400"></i>
+          </div>
+          <div class="text-2xl font-bold font-mono text-white">25.0 <span class="text-xs text-slate-400 font-normal">/ 25</span></div>
+          <div class="text-[11px] text-purple-400 mt-1">死守 F=0 与 H=0 红线</div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5">
+          <div class="text-xs text-slate-400 mb-1 flex items-center justify-between">
+            <span>B/E/A 类高分组合</span>
+            <i data-lucide="shield" class="w-4 h-4 text-amber-400"></i>
+          </div>
+          <div class="text-2xl font-bold font-mono text-white">35.0 <span class="text-xs text-slate-400 font-normal">/ 35</span></div>
+          <div class="text-[11px] text-amber-400 mt-1">排他拦截 U=0 + 8大核心槽位</div>
+        </div>
+      </div>
+
+      <!-- 25 题全景交付物矩阵 (5x5 Grid) -->
+      <div class="glass-panel rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center space-x-2">
+              <i data-lucide="grid" class="w-4 h-4 text-sky-400"></i>
+              <span>全赛题 25 题交付成果矩阵 (Benchmark Matrix)</span>
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">实时扫描工作区 `data/&lt;team&gt;/` 结果 JSON 与双写 Markdown</p>
+          </div>
+
+          <button onclick="runAutoValidation()" class="px-3.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-medium hover:bg-emerald-500/30 transition flex items-center space-x-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            <span>重新执行预检流水线</span>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-3" id="benchmarkMatrix">
+          <!-- 动态注入 25 题卡片 -->
+        </div>
+      </div>
+
+      <!-- 自动化预检流水线日志报告 -->
+      <div class="glass-panel rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-bold text-white flex items-center space-x-2">
+            <i data-lucide="terminal" class="w-4 h-4 text-emerald-400"></i>
+            <span>合规预检自动化流水线执行日志 (validate_submission.py)</span>
+          </h3>
+          <span id="valStatusPill" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-mono">100% PASS</span>
+        </div>
+
+        <pre id="valOutputTerminal" class="p-4 rounded-xl bg-dark-950 font-mono text-xs text-slate-300 overflow-x-auto max-h-64 border border-slate-800">正在执行预检...</pre>
+      </div>
+    </section>
+
+    <!-- ================= 视图 5：文献资产库 (Papers View) ================= -->
+    <section id="view-papers" class="hidden space-y-6">
+      <div class="glass-panel rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-sm font-bold text-white flex items-center space-x-2">
+              <i data-lucide="book-open" class="w-4 h-4 text-sky-400"></i>
+              <span>本地文献知识库与物理页切片索引 (Paper Explorer)</span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">PyMuPDF 物理页流式索引，常驻内存 &lt; 30MB</p>
+          </div>
+          <span id="papersCountBadge" class="text-xs font-mono px-2.5 py-1 rounded-lg bg-slate-800 text-sky-400 border border-slate-700">11 篇顶会论文</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="papersGrid">
+          <!-- 动态加载论文卡片 -->
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- 浮层：自定义任务运行弹窗 (Modal) -->
+  <div id="customTaskModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl p-6 max-w-xl w-full border-sky-500/40 space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+        <h3 class="text-base font-bold text-white flex items-center space-x-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-sky-400"></i>
+          <span>自定义科研推演与在线调用 (Custom Playground)</span>
+        </h3>
+        <button onclick="closeCustomTaskModal()" class="text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1">选择调用的 Agent 类别:</label>
+          <select id="modalAgentFunc" class="w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-2 font-mono outline-none focus:border-sky-500">
+            <option value="Chat">A 类 · Chat Agent (学术机理解构与变量限定追问)</option>
+            <option value="Literature_Retrieval">B 类 · Retrieval Agent (排他检索防火墙)</option>
+            <option value="Survey" selected>C 类 · Survey Agent (长篇学术综述与引文溯源)</option>
+            <option value="Reproduction">D 类 · Reproduction Agent (论文复现与指标分析)</option>
+            <option value="Idea">E 类 · Idea Agent (8大槽位对齐与模拟观察隔离)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">自定义题目/任务名称:</label>
+          <input type="text" id="modalTaskTitle" value="多智能体系统在科研长上下文检索中的鲁棒性评估" class="w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-2 outline-none focus:border-sky-500">
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">任务描述与具体输入要求 (Prompt):</label>
+          <textarea id="modalTaskInput" rows="3" class="w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-2 outline-none focus:border-sky-500">结合前沿文献，分析长上下文窗口对多智能体协同推理的注意力衰减现象，并提出基于分块嵌入的解决路径。</textarea>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">参考材料 (可选论文 PDF，逗号分隔):</label>
+          <input type="text" id="modalTaskMaterials" value="Late_Chunking_Contextual_Chunk_Embeddings.pdf, PaperQA2_Language_Agents_Superhuman_Scientific_Synthesis.pdf" class="w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-2 font-mono outline-none focus:border-sky-500">
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2 pt-2 border-t border-slate-800">
+        <button onclick="closeCustomTaskModal()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">取消</button>
+        <button onclick="submitCustomTask()" class="px-5 py-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-xs font-semibold shadow-md shadow-sky-500/20 transition">立即启动推演</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 引文物理页码溯源弹出卡片 (Citation Popover) -->
+  <div id="citationModal" class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl p-5 max-w-md w-full border-sky-500/40 space-y-3">
+      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+        <div class="flex items-center space-x-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-sky-400"></span>
+          <h4 id="citationModalTitle" class="text-sm font-bold text-white">引文物理页码真实溯源</h4>
+        </div>
+        <button onclick="closeCitationModal()" class="text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div id="citationModalBody" class="text-xs text-slate-300 space-y-2">
+        <!-- 动态内容 -->
+      </div>
+    </div>
+  </div>
+
+  <!-- 核心交互脚本 -->
+  <script src="/static/app.js"></script>
+</body>
+</html>

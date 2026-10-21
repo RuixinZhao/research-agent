@@ -51,8 +51,15 @@ def test_relative_error_computed_when_both_values_present(repro_test_env, monkey
         "figures": []
     }
 
-    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
+    monkeypatch.setattr(handler, "_invoke_official_runner", lambda case_id, impl_path, timeout=90: mock_submission)
 
     task = ChallengeTaskInput(
         case_id="D-01",
@@ -121,8 +128,15 @@ def test_relative_error_none_when_reference_missing(repro_test_env, monkeypatch)
         "figures": []
     }
 
-    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
+    monkeypatch.setattr(handler, "_invoke_official_runner", lambda case_id, impl_path, timeout=90: mock_submission)
 
     task = ChallengeTaskInput(
         case_id="D-02",

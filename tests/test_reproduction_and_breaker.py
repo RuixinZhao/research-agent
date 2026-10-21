@@ -19,6 +19,11 @@ from server import app
 
 client = TestClient(app)
 
+VALID_PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\x08\x02\x00\x00\x00\x02PX\xea"
+    b"\x00\x00\x00\x13IDATx\x9cc\xfc\xcf\x80\x0f0\xe1\x95e\x18\xa9\xd2\x00A,\x01\x13y\xed\xba&\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 
 # -------------------------------------------------------------
 # 1. Circuit Breaker & Timeout Guard Unit Tests
@@ -88,9 +93,73 @@ def isolated_repro_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("case_id", ["D-01", "D-02", "D-03", "D-04", "D-05"])
-def test_reproduction_d01_to_d05_offline(isolated_repro_env, case_id):
+def test_reproduction_d01_to_d05_offline(isolated_repro_env, case_id, monkeypatch):
     output_dir, team = isolated_repro_env
     handler = ReproductionHandler()
+
+    # Mock 材料读取（对 D-03/D-04 补充 mock 材料，D-01/D-02/D-05 读取真实材料）
+    orig_materials = handler._read_experiment_materials(case_id)
+    if not orig_materials:
+        monkeypatch.setattr(
+            handler,
+            "_read_experiment_materials",
+            lambda cid: {
+                "method": f"# Method for {cid}\nDescription.",
+                "protocol": json.dumps({
+                    "case_id": cid,
+                    "metrics": [
+                        {"name": "Macro-F1", "unit": "分数"},
+                        {"name": "Accuracy", "unit": "%"},
+                        {"name": "运行时间", "unit": "秒"}
+                    ]
+                }),
+                "sample": json.dumps({"case_id": cid, "data": []})
+            }
+        )
+
+    # Mock LLM 代码生成响应
+    mock_llm_resp = {
+        "id": "chatcmpl-mock",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef run_experiment(request):\n    return {'status': 'completed'}\n```"
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    }
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: mock_llm_resp)
+
+    # Mock 官方 runner 执行
+    def mock_runner(cid, impl_path=None, timeout=90, **kwargs):
+        fig_rel = f"data/figure/{team}/{cid}.png"
+        fig_full = output_dir / fig_rel
+        fig_full.parent.mkdir(parents=True, exist_ok=True)
+        fig_full.write_bytes(VALID_PNG_BYTES)
+
+        return {
+            "case_id": cid,
+            "status": "completed",
+            "metrics": [
+                {"name": "Macro-F1", "unit": "分数", "reference": None, "observed": 0.85, "relative_error": None},
+                {"name": "Accuracy", "unit": "%", "reference": None, "observed": 91.2, "relative_error": None},
+                {"name": "运行时间", "unit": "秒", "reference": None, "observed": 12.3, "relative_error": None}
+            ],
+            "figures": [
+                {
+                    "path": fig_rel,
+                    "caption": f"实验真实曲线 {cid}",
+                    "x_label": "Epoch",
+                    "y_label": "Loss",
+                    "legend": "Baseline"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(handler, "_invoke_official_runner", mock_runner)
 
     task = ChallengeTaskInput(
         case_id=case_id,
@@ -171,15 +240,160 @@ def test_reproduction_materials_missing_fallback(isolated_repro_env):
     assert saved_json.is_file()
 
 
+def test_reproduction_llm_truncation_retry(isolated_repro_env, monkeypatch):
+    """
+    测试模型输出因长度限制被截断 (finish_reason=='length') 时的重试机制：
+    首次调用返回 length 截断，二次调用返回 stop 正常代码。
+    """
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    call_count = 0
+    prompts_received = []
+
+    def mock_post(client_self, url, json=None, headers=None, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        messages = json.get("messages", [])
+        prompts_received.append(messages[-1]["content"])
+
+        if call_count == 1:
+            return type("MockResp", (), {
+                "status_code": 200,
+                "raise_for_status": lambda *a, **kw: None,
+                "json": lambda *a, **kw: {
+                    "id": "chatcmpl-trunc",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "```python\ndef run_experiment(request):\n    # truncated"
+                            },
+                            "finish_reason": "length"
+                        }
+                    ]
+                }
+            })()
+        else:
+            return type("MockResp", (), {
+                "status_code": 200,
+                "raise_for_status": lambda *a, **kw: None,
+                "json": lambda *a, **kw: {
+                    "id": "chatcmpl-complete",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "```python\ndef run_experiment(request):\n    return {'status': 'completed'}\n```"
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                }
+            })()
+
+    monkeypatch.setattr("httpx.Client.post", mock_post)
+
+    work_dir = output_dir / "work_trunc_test"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    resp = handler._call_platform_llm("Initial prompt", work_dir=work_dir, timeout=60)
+    assert call_count == 2, "Expected 1 initial call + 1 retry call"
+    assert resp["choices"][0]["finish_reason"] == "stop"
+    assert "截断" in prompts_received[1] or "重试" in prompts_received[1]
+
+    # 验证落盘的 generation-response.json
+    gen_file = work_dir / "generation-response.json"
+    assert gen_file.is_file()
+    saved = json.loads(gen_file.read_text(encoding="utf-8"))
+    assert saved["id"] == "chatcmpl-complete"
+
+    # 验证保存 implementation.py 成功
+    impl_path = handler._save_implementation(resp, work_dir=work_dir)
+    assert impl_path.is_file()
+    assert "run_experiment" in impl_path.read_text(encoding="utf-8")
+
+
+def test_reproduction_runner_failure_fallback(isolated_repro_env, monkeypatch):
+    """
+    测试官方 runner 调度失败时的优雅降级（status='failed'，observed 为 None）。
+    """
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
+    monkeypatch.setattr(handler, "_invoke_official_runner", lambda cid, impl_path=None, timeout=90, **kwargs: None)
+
+    task = ChallengeTaskInput(
+        case_id="D-01",
+        function="Reproduction",
+        title="Runner 失败测试",
+        input="测试 runner 故障降级",
+        materials=[],
+        constraints=[],
+        expected_output="应当降级为 failed",
+        output_schema_ref="Reproduction"
+    )
+
+    result = handler.handle(task, session_id="test-session")
+    assert result["case_id"] == "D-01"
+    assert result["status"] == "failed"
+    assert len(result["metrics"]) == 3
+    for m in result["metrics"]:
+        assert m["observed"] is None
+        assert m["relative_error"] is None
+    assert result["figures"] == []
+
+
 def test_reproduction_corrupted_figure_fallback(isolated_repro_env, monkeypatch):
     output_dir, team = isolated_repro_env
     handler = ReproductionHandler()
 
-    # 模拟核验图表时损坏的情况
-    def mock_corrupt_verify(*args, **kwargs):
-        return False
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
 
-    monkeypatch.setattr(handler, "_verify_and_sync_figures", mock_corrupt_verify)
+    def mock_runner(cid, impl_path=None, timeout=90, **kwargs):
+        fig_rel = f"data/figure/{team}/{cid}.png"
+        fig_full = output_dir / fig_rel
+        fig_full.parent.mkdir(parents=True, exist_ok=True)
+        # 写入损坏的非 PNG 内容
+        fig_full.write_bytes(b"CORRUPTED_NOT_PNG_DATA")
+
+        return {
+            "case_id": cid,
+            "status": "completed",
+            "metrics": [
+                {"name": "Macro-F1", "unit": "分数", "reference": None, "observed": 0.85, "relative_error": None},
+                {"name": "Accuracy", "unit": "%", "reference": None, "observed": 91.2, "relative_error": None},
+                {"name": "运行时间", "unit": "秒", "reference": None, "observed": 12.3, "relative_error": None}
+            ],
+            "figures": [
+                {
+                    "path": fig_rel,
+                    "caption": f"实验损坏图表 {cid}",
+                    "x_label": "Epoch",
+                    "y_label": "Loss",
+                    "legend": "Baseline"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(handler, "_invoke_official_runner", mock_runner)
 
     task = ChallengeTaskInput(
         case_id="D-01",
@@ -204,8 +418,50 @@ def test_reproduction_corrupted_figure_fallback(isolated_repro_env, monkeypatch)
 # 3. Server HTTP POST /solve Integration Test
 # -------------------------------------------------------------
 
-def test_server_reproduction_solve_endpoint(isolated_repro_env):
+def test_server_reproduction_solve_endpoint(isolated_repro_env, monkeypatch):
     output_dir, team = isolated_repro_env
+
+    mock_llm_resp = {
+        "id": "chatcmpl-mock",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef run_experiment(request):\n    return {'status': 'completed'}\n```"
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    }
+    monkeypatch.setattr(ReproductionHandler, "_call_platform_llm", lambda self, prompt, work_dir, timeout=60: mock_llm_resp)
+
+    def mock_runner(self, cid, impl_path=None, timeout=90, **kwargs):
+        fig_rel = f"data/figure/{team}/{cid}.png"
+        fig_full = output_dir / fig_rel
+        fig_full.parent.mkdir(parents=True, exist_ok=True)
+        fig_full.write_bytes(VALID_PNG_BYTES)
+
+        return {
+            "case_id": cid,
+            "status": "completed",
+            "metrics": [
+                {"name": "Macro-F1", "unit": "分数", "reference": None, "observed": 0.85, "relative_error": None},
+                {"name": "Accuracy", "unit": "%", "reference": None, "observed": 91.2, "relative_error": None},
+                {"name": "运行时间", "unit": "秒", "reference": None, "observed": 12.3, "relative_error": None}
+            ],
+            "figures": [
+                {
+                    "path": fig_rel,
+                    "caption": f"实验真实曲线 {cid}",
+                    "x_label": "Epoch",
+                    "y_label": "Loss",
+                    "legend": "Baseline"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(ReproductionHandler, "_invoke_official_runner", mock_runner)
 
     payload = {
         "case_id": "D-01",
@@ -228,39 +484,10 @@ def test_server_reproduction_solve_endpoint(isolated_repro_env):
 
 
 # -------------------------------------------------------------
-# 4. Zero LLM Dependency & Concurrent Multi-task Execution Tests
+# 4. Concurrent Multi-task Execution Tests
 # -------------------------------------------------------------
 
-def test_reproduction_strictly_no_llm_dependency(isolated_repro_env, monkeypatch):
-    """
-    确保 D 类在任何情况下都不依赖外网大模型：
-    即使 LLM 网关配置完全错误，D 类仍然能够 100% 确定性离线完成。
-    """
-    monkeypatch.setattr(settings, "CHALLENGE_LLM_BASE_URL", "http://non-existent-gateway.invalid:9999/v1")
-    monkeypatch.setattr(settings, "CHALLENGE_LLM_API_KEY", "INVALID_KEY")
-    
-    handler = ReproductionHandler()
-    assert handler.llm is None, "ReproductionHandler must explicitly have self.llm = None"
-
-    task = ChallengeTaskInput(
-        case_id="D-01",
-        function="Reproduction",
-        title="D-01 纯离线执行",
-        input="测试无网络条件下的 D 类执行",
-        materials=[],
-        constraints=[],
-        expected_output="生成 submission.json 与图表",
-        output_schema_ref="Reproduction"
-    )
-
-    result = handler.handle(task, session_id="test-session")
-    assert result["status"] == "completed"
-    assert result["metrics"][0]["observed"] is not None
-    assert result["metrics"][0]["reference"] is None
-    assert result["metrics"][0]["relative_error"] is None
-
-
-def test_reproduction_concurrent_multi_tasks(isolated_repro_env):
+def test_reproduction_concurrent_multi_tasks(isolated_repro_env, monkeypatch):
     """
     测试 D-01 到 D-05 在多线程并发执行环境下的鲁棒性：
     防止多任务并发引起的文件读写交叉污染、竞争冒险或产物混淆。
@@ -269,6 +496,62 @@ def test_reproduction_concurrent_multi_tasks(isolated_repro_env):
     output_dir, team = isolated_repro_env
 
     cases = ["D-01", "D-02", "D-03", "D-04", "D-05"]
+
+    mock_llm_resp = {
+        "id": "chatcmpl-mock",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "```python\ndef run_experiment(request):\n    return {'status': 'completed'}\n```"
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    }
+    monkeypatch.setattr(ReproductionHandler, "_call_platform_llm", lambda self, prompt, work_dir, timeout=60: mock_llm_resp)
+
+    def mock_runner(self, cid, impl_path=None, timeout=90, **kwargs):
+        fig_rel = f"data/figure/{team}/{cid}.png"
+        fig_full = output_dir / fig_rel
+        fig_full.parent.mkdir(parents=True, exist_ok=True)
+        fig_full.write_bytes(VALID_PNG_BYTES)
+
+        return {
+            "case_id": cid,
+            "status": "completed",
+            "metrics": [
+                {"name": "Macro-F1", "unit": "分数", "reference": None, "observed": 0.85, "relative_error": None},
+                {"name": "Accuracy", "unit": "%", "reference": None, "observed": 91.2, "relative_error": None},
+                {"name": "运行时间", "unit": "秒", "reference": None, "observed": 12.3, "relative_error": None}
+            ],
+            "figures": [
+                {
+                    "path": fig_rel,
+                    "caption": f"实验真实曲线 {cid}",
+                    "x_label": "Epoch",
+                    "y_label": "Loss",
+                    "legend": "Baseline"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(ReproductionHandler, "_invoke_official_runner", mock_runner)
+
+    orig_read_mat = ReproductionHandler._read_experiment_materials
+
+    def mock_read_mat(self, cid):
+        real = orig_read_mat(self, cid)
+        if real:
+            return real
+        return {
+            "method": f"# Method for {cid}",
+            "protocol": json.dumps({"case_id": cid, "metrics": []}),
+            "sample": json.dumps({"case_id": cid})
+        }
+
+    monkeypatch.setattr(ReproductionHandler, "_read_experiment_materials", mock_read_mat)
 
     def run_case(cid):
         h = ReproductionHandler()
@@ -340,8 +623,15 @@ def test_relative_error_computed_when_both_values_present(isolated_repro_env, mo
         "figures": []
     }
 
-    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
+    monkeypatch.setattr(handler, "_invoke_official_runner", lambda cid, impl_path=None, timeout=90, **kwargs: mock_submission)
 
     task = ChallengeTaskInput(
         case_id="D-01",
@@ -383,8 +673,15 @@ def test_relative_error_none_when_reference_missing(isolated_repro_env, monkeypa
         "figures": []
     }
 
-    monkeypatch.setattr(handler, "_locate_and_parse_submission", lambda case_id, work_dir, stdout: mock_submission)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(handler, "_call_platform_llm", lambda prompt, work_dir, timeout=60: {
+        "id": "chatcmpl-mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    return {}\n```"},
+            "finish_reason": "stop"
+        }]
+    })
+    monkeypatch.setattr(handler, "_invoke_official_runner", lambda cid, impl_path=None, timeout=90, **kwargs: mock_submission)
 
     task = ChallengeTaskInput(
         case_id="D-02",
@@ -455,7 +752,5 @@ def test_fallback_returns_none_relative_error(isolated_repro_env):
 def test_figures_empty_allowed_in_local_offline_mode():
     """验证在本地离线模式下 (is_online=False)，figures 为 [] 时允许通过"""
     handler = ReproductionHandler()
-    assert handler._verify_and_sync_figures("D-01", {"figures": []}, "/tmp", is_online=False) is True
-    assert handler._verify_and_sync_figures("D-01", {"figures": []}, "/tmp", is_online=True) is False
-
-
+    assert handler._verify_and_sync_figures("D-01", {"figures": []}, Path("/tmp"), is_online=False) is True
+    assert handler._verify_and_sync_figures("D-01", {"figures": []}, Path("/tmp"), is_online=True) is False

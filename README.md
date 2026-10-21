@@ -51,3 +51,28 @@ pip install PyMuPDF fastapi uvicorn httpx
 cd research-experiments
 python calibrate.py --data publicdata --output /tmp/calibration
 ```
+
+---
+
+## 🚀 AGY-Research Studio · 科研助手多智能体具象化控制台
+
+系统内置了现代化高科技深色质感前端具象化控制台（基于 FastAPI + TailwindCSS + Lucide + Marked.js + Chart.js 单页应用），用于全方位、具象化直观体现科研 Agent 的中枢思考、架构拓扑、证据链溯源与多模态成果：
+
+### 启动方式
+```bash
+python server.py
+```
+启动后在浏览器打开：
+👉 **`http://localhost:8080/`**
+
+### 控制台具象化核心板块：
+1. **🌐 Agent 架构全景拓扑 (Architecture Topology)**：五大专项 Agent（Chat, Retrieval, Survey, Reproduction, Idea）与底层安全基础设施（SQLite FTS5、PyMuPDF、PaperQA2 证据链、RefChecker 双重审计、150s 熔断保护）动态交互拓扑与时序流。
+2. **⚡ 任务推演与交互工作台 (Task Playground)**：支持一键加载 25 道基准赛题或自定义输入题目，动态展示 5 大阶段时序流动效（题目解析 ➔ 物理页检索 ➔ 学术推理/复现 ➔ 事实审计 ➔ 双写核验）。
+3. **📑 多模态成果阅览器 (Artifact Viewer)**：
+   - **C类/E类成果**：Markdown 深度排版、实时字数统计徽章（$\ge 800$ 字）、**可交互物理页码引文徽章**（点击即可弹出真实物理页证据溯源浮层）、8 大核心二级标题覆盖率雷达、模拟观察待验证证据隔离区警示框；
+   - **D类复现成果**：真实生成的 PNG 实验曲线图（魔数绿标 `89 50 4E 47` 验真）、Observed vs Reference 指标对比卡片与误差分析；
+   - **A类学术对话**：学术机理解析卡片 + 变量范围限定澄清追问；
+   - **B类排他检索**：命中文献列表 + 排他规则拦截日志。
+4. **🏆 100分基准评测大盘 (Benchmark 100 Pts Radar)**：100 分总分看板（D类40分、C类25分、B类15分、E类15分、A类5分）、5x5 矩阵全景卡片、内置一键触发自动化预检流水线（`validate_submission.py` 100% PASS 徽章）。
+5. **📚 文献资产库 (Paper Explorer)**：直观浏览 11 篇顶会论文元数据与物理页切片分布。
+
