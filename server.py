@@ -1,11 +1,25 @@
 import os
+from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.schemas.task import ChallengeTaskInput
+from app.web.router import router as web_router, STATIC_DIR
 
 app = FastAPI(title="Research-Agent", version="1.1.1")
+
+# 挂载前端可视化与具象化控制台
+app.include_router(web_router)
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# 挂载图表目录供前端实时预览
+figures_path = Path("data/figure")
+if figures_path.is_dir():
+    app.mount("/figures", StaticFiles(directory=str(figures_path)), name="figures")
+
 
 # 动态按需加载 handlers 容器
 _HANDLERS = {}
