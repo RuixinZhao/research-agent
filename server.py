@@ -8,7 +8,7 @@ from app.config import settings
 from app.schemas.task import ChallengeTaskInput
 from app.web.router import router as web_router, STATIC_DIR
 
-app = FastAPI(title="Research-Agent", version="1.1.1")
+app = FastAPI(title="Research-Agent", version="1.2.0")
 
 # 挂载前端可视化与具象化控制台
 app.include_router(web_router)
