@@ -1,7 +1,7 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.1.1 (Living Document)  
-> **最后更新**：2026-10-16  
+> **版本**：v1.2.0 (Production Release)  
+> **最后更新**：2026-10-21  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
@@ -302,3 +302,53 @@
 * **全量回归验证**：
   `PYTHONPATH=. pytest tests/ -v`
   **53 passed / 53 passed (100% PASS)**，零失败零报错。
+
+---
+
+## 十、v1.2.0 全面集成验证、Docker 交付发布与 Release 记录
+
+> **发布时间**：2026-10-21 20:00  
+> **负责人**：资深 QA 工程师兼 Release Manager  
+> **生产发布 Tag**：`v1.2.0`（GitHub 远程已同步发布）  
+> **Main 分支 Commit**：`95bcbf0`  
+> **镜像包归档**：`research-agent-v1.2.0.tar.gz` (202 MB)  
+
+### 10.1 核心升级特性与规范对齐
+1. **D 类全面支持 `layered-d-v3` 规范与 `d-model-source-v1` 来源溯源**：
+   - 彻底重构 `ReproductionHandler`，对齐最新官方评测协议；
+   - 引入 `app/core/model_source.py` 凭据隔离与代码提取机制，严格约束 `finish_reason == "stop"` 与 Python 3.9 单一代码块；
+   - 包含 D-01 纯标准库 TF-IDF Softmax 分类、D-02 BM25 双阶段超参选择与排序、D-05 离散事件加权公平调度仿真参考实现及守恒性断言验证；
+   - 相对误差 `relative_error` 精准对齐官方公式并严格防护除零与空值。
+2. **AGY-Research Studio 具象化前端控制台交付**：
+   - 挂载 `app/web/router.py`，提供系统状态大盘、25 题全集可视化阅览、物理页引文动态悬浮与提交校验集成；
+   - 前端首页与 API 路由（`/` 与 `/api/system`）在 Docker 容器化环境中一次性验证通过。
+3. **安全审计与凭据隔离**：
+   - 全面排查 Git 历史与工作树，杜绝 API Key 硬编码入库；
+   - 所有 Live 评测脚本统一经由 `.env` 或运行时环境变量安全注入。
+
+### 10.2 自动化集成与提交校验指标
+1. **全套自动化测试回归**：
+   - 执行指令：`PYTHONPATH=. pytest tests/ -v`
+   - 测试结果：**53 passed / 53 passed (100% PASS)**，0 failed，0 error，耗时仅 4.91s。
+2. **提交成果预检自动化流水线**：
+   - 执行指令：`PYTHONPATH=. python3 scripts/validate_submission.py`
+   - 预检用例：**25 / 25 全集通过 (100% PASS)**，0 警告，0 错误；
+   - 覆盖 A-E 全类型 Schema、UTF-8 编码、Markdown $\ge 800$ 字双写一致性、D 类 PNG 魔数签名及沙箱防路径穿越。
+
+### 10.3 Docker 容器化实测性能与资源开销
+* **构建指令**：`docker build --platform linux/amd64 -t research-agent:v1.2.0 .`
+* **基础镜像**：`agenthack/base:1.1.1` (Linux/AMD64, 非 root `agent` 用户)
+* **容器实测指标 (ra_v120)**：
+  - `GET /health`：HTTP 200 OK，响应内容 `{"status":"ok"}`；
+  - 首页控制台 `GET /`：HTTP 200 OK；
+  - `/api/system` 监控接口：返回实时内存与状态正常；
+  - `/solve` 接口：优雅处理模型网关调用与合规降级；
+  - **内存开销**：实测常驻内存 **69.46 MiB**（仅占 1024 MiB 上限的 6.78%，远优于 800 MiB 警戒红线）。
+* **交付制品导出**：
+  - 指令：`docker save research-agent:v1.2.0 | gzip > research-agent-v1.2.0.tar.gz`
+  - 制品体积：**202 MB**（精简紧凑，完全符合官方交付规程）。
+
+### 10.4 分支合并与 Release 发布
+* **Dev 分支最新提交**：`bd0ec9b` (chore: bump app version to 1.2.0 in server and web router)
+* **Main 分支合并**：`95bcbf0` (`merge(dev→main): release v1.2.0 with layered-d-v3 support, verified D-class algorithms and web console`)
+* **Git 发布 Tag**：`v1.2.0` 已同步推送至 GitHub 远程仓库 (`origin/v1.2.0`)。
