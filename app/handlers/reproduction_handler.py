@@ -4,36 +4,37 @@ import json
 import shutil
 import logging
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+import httpx
+
 from app.config import settings
+from app.core.circuit_breaker import TaskTimeoutGuard, TaskTimeoutException
+from app.core.model_source import save_source
 from app.handlers.base_handler import BaseHandler
 from app.schemas.task import ChallengeTaskInput
 from app.schemas.response import ReproductionOutput
 
 logger = logging.getLogger(__name__)
 
+
 class ReproductionHandler(BaseHandler):
     """
     D 类复现任务处理器（分值 40 分，P0 核心优先级）。
-    
-    核心职责：
-    1. 双模环境探测：线上独享 Unix 通道 runner (/data/experiments/run_experiment.py) vs 本地离线执行脚本
-    2. 子进程受控调度：硬限 140s 超时防卡死，实时捕获阶段事件
-    3. 解析 submission.json，确保指标字段规范与 case_id 严格一致
-    4. PNG 图表真实性深度核验：存在性、8 字节魔数签名、PIL 图像完整性、元数据(caption/x_label/y_label/legend)齐全性
-    5. 故障/超时/材料缺失合规优雅降级：禁止伪造 observed 指标与图表，准确输出 failed/materials_missing
-    6. 双写落盘与一致性回读核验
-    """
+    对齐平台最新的 layered-d-v3 规范与 d-model-source-v1 来源验证标准。
 
-    TASK_IDS = {
-        "D-01": "TASK_D_01_SINGLE_MACHINE",
-        "D-02": "TASK_D_02_SINGLE_MACHINE",
-        "D-03": "TASK_D_03_SINGLE_MACHINE",
-        "D-04": "TASK_D_04_SINGLE_MACHINE",
-        "D-05": "TASK_D_05_SINGLE_MACHINE",
-    }
+    核心流程：
+    1. 材料读取：优先从 /data/experiments/{case_id} 读取 method.md, protocol.json, sample.json，
+       缺省回退至本地 research-experiments-v1/{case_id}；
+    2. 代码生成：通过平台 Gateway 请求模型生成 run_experiment(request) 完整 Python 3.9 代码，
+       支持 60s 超时及遇截断 (finish_reason=length) 最多 1 次重试；
+    3. 源码提取与落盘：完整保存原始 generation-response.json，并调用 model_source.save_source
+       严格校验 finish_reason==stop 与 AST 语法树，提取保存至 implementation.py；
+    4. 官方 Runner 调度：在注入环境变量后调用官方 run_experiment.py，解析 stdout 最终答卷 JSON；
+    5. 误差计算与图表验真：核验 8 字节 PNG 魔数与 PIL 完整性，计算 relative_error；
+    6. 合规优雅降级与 180s 熔断保护：遇材料缺失或执行失败时指标数值一律置为 null，拒绝伪造假数据。
+    """
 
     METRIC_SPECS = {
         "D-01": [("Macro-F1", "分数"), ("Accuracy", "%"), ("运行时间", "秒")],
@@ -47,207 +48,326 @@ class ReproductionHandler(BaseHandler):
 
     def __init__(self):
         super().__init__()
-        # D 类复现任务属于 100% 确定性的离线代码执行与图表提取，
-        # 坚决不依赖外部 LLM Gateway，彻底杜绝外网网络抖动或 Gateway 限流对 40 分基底的影响。
-        self.llm = None
 
-    def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
-        case_id = task.case_id.strip()
-        logger.info(f"ReproductionHandler: Starting reproduction task for {case_id}")
+    def _read_experiment_materials(self, case_id: str) -> Dict[str, str]:
+        """
+        依次读取 method.md、protocol.json、sample.json。
+        优先读取 /data/experiments/{case_id}，缺省则回退至本地 research-experiments-v1/{case_id}。
+        """
+        project_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            Path("/data/experiments") / case_id,
+            Path(settings.EXPERIMENTS_DIR) / case_id,
+            project_root / "research-experiments-v1" / case_id,
+            Path(os.getcwd()) / "research-experiments-v1" / case_id,
+        ]
 
-        official_runner = os.path.join(settings.EXPERIMENTS_DIR, "run_experiment.py")
-        if not os.path.exists(official_runner):
-            official_runner = "/data/experiments/run_experiment.py"
+        target_dir = None
+        for cand in candidates:
+            if cand.is_dir():
+                target_dir = cand
+                break
 
-        # 1. 确定运行模式与执行命令
-        is_online = os.path.exists(official_runner)
-        work_dir = os.path.join(self.file_writer.root, f"data/{self.team_name}/work/{case_id}")
-        os.makedirs(work_dir, exist_ok=True)
+        if not target_dir:
+            logger.warning(f"ReproductionHandler: Materials directory not found for {case_id}")
+            return {}
+
+        req_files = ["method.md", "protocol.json", "sample.json"]
+        materials = {}
+        for fname in req_files:
+            p = target_dir / fname
+            if not p.is_file():
+                logger.warning(f"ReproductionHandler: Missing material file {p} for {case_id}")
+                return {}
+            try:
+                materials[fname.split(".")[0]] = p.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.error(f"ReproductionHandler: Failed to read material {p}: {e}")
+                return {}
+
+        return materials
+
+    def _build_generation_prompt(
+        self,
+        case_id: str,
+        materials: Dict[str, str],
+        task_input: Optional[str] = None,
+        retry_reason: Optional[str] = None
+    ) -> str:
+        """
+        构造严格的代码生成提示词，严禁外部网络请求与非标准库依赖，
+        要求仅输出一个包含 def run_experiment(request): 的 ```python 代码块。
+        """
+        method = materials.get("method", "")
+        protocol = materials.get("protocol", "")
+        sample = materials.get("sample", "")
+        input_desc = str(task_input or f"请复现 {case_id} 实验，输出指标与图表")
+
+        prompt = (
+            "请根据以下公开方法和协议，自行实现完整的Python3.9标准库算法。\n"
+            "必须定义 def run_experiment(request): 函数，不得联网、打印日志或读取隐藏标签。\n"
+            "只返回一个完整的```python代码块，不要省略函数、返回补丁或拆分成多段。\n\n"
+            f"【任务信息】\n{input_desc}\n\n"
+            f"【公开方法 (method.md)】\n{method}\n\n"
+            f"【协议规范 (protocol.json)】\n{protocol}\n\n"
+            f"【公开样例 (sample.json)】\n{sample}\n"
+        )
+
+        if retry_reason:
+            prompt += (
+                f"\n【重要重试说明】\n前一次生成失败：{retry_reason}\n"
+                "请务必针对上述原因修复，并输出一个单一、完整且无截断的 ```python 代码块。"
+            )
+
+        return prompt
+
+    def _call_platform_llm(self, prompt: str, work_dir: Path, timeout: int = 60) -> dict:
+        """
+        使用 httpx 调用赛事 Gateway 请求大模型生成代码，检查 finish_reason=='stop'。
+        若遇截断 (finish_reason=='length') 且时间充裕，执行 1 次重试提示。
+        完整保存 generation-response.json（不包含请求头或 API Key）。
+        """
+        base_url = (
+            os.environ.get("PLATFORM_LLM_URL")
+            or os.environ.get("CHALLENGE_LLM_BASE_URL")
+            or settings.CHALLENGE_LLM_BASE_URL
+        ).rstrip("/")
+
+        api_key = (
+            os.environ.get("PLATFORM_API_KEY")
+            or os.environ.get("CHALLENGE_LLM_API_KEY")
+            or settings.CHALLENGE_LLM_API_KEY
+        )
+
+        model = (
+            os.environ.get("PLATFORM_LLM_MODEL")
+            or os.environ.get("CHALLENGE_LLM_MODEL")
+            or settings.CHALLENGE_LLM_MODEL
+        )
+
+        endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert scientific algorithm engineer. "
+                        "You strictly output only Python 3.9 standard library code. "
+                        "Do not use third-party libraries, do not make network calls, do not write log files or print statements. "
+                        "You must define run_experiment(request) that conforms to the specification. "
+                        "Output exactly one ```python ... ``` code block without any explanations or multiple code blocks."
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "stream": False,
+        }
+
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        response_file = work_dir / "generation-response.json"
+
+        def _do_request(body_data: dict, req_timeout: int) -> dict:
+            with httpx.Client(timeout=req_timeout) as client:
+                resp = client.post(endpoint, json=body_data, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+
+        # 首次调用
+        data = _do_request(payload, timeout)
+        response_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 检查是否因长度限制截断
+        choices = data.get("choices", [])
+        if choices and choices[0].get("finish_reason") == "length":
+            logger.warning("ReproductionHandler: Model output truncated (finish_reason=length). Retrying once...")
+            retry_prompt = (
+                prompt + "\n\n"
+                "【重要修复提示】上一次生成的代码因长度超限被截断（finish_reason=length）。"
+                "请务必精简代码，仅保留核心算法与必要逻辑，确保在单一 ```python ... ``` 代码块内完整闭合输出 def run_experiment(request):。"
+            )
+            payload["messages"] = [
+                payload["messages"][0],
+                {"role": "user", "content": retry_prompt}
+            ]
+            try:
+                data = _do_request(payload, timeout)
+                response_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                logger.error(f"ReproductionHandler: Retry LLM call failed: {e}")
+
+        return data
+
+    def _save_implementation(self, response: dict, work_dir: Path) -> Path:
+        """
+        调用 app.core.model_source.save_source 将源码安全解析并保存至 work_dir / 'implementation.py'。
+        若格式不合规或 finish_reason != 'stop' 则抛出 ValueError。
+        """
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        impl_path = work_dir / "implementation.py"
+        source_sha256 = save_source(response, impl_path)
+        logger.info(f"ReproductionHandler: Saved implementation to {impl_path} (sha256={source_sha256})")
+        return impl_path
+
+    def _find_official_runner(self) -> Optional[Path]:
+        """定位官方 runner 脚本路径"""
+        project_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            Path("/data/experiments/run_experiment.py"),
+            Path(settings.EXPERIMENTS_DIR) / "run_experiment.py",
+            project_root / "research-experiments-v1" / "run_experiment.py",
+            Path(os.getcwd()) / "research-experiments-v1" / "run_experiment.py",
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        return None
+
+    def _invoke_official_runner(self, case_id: str, impl_path: Path, timeout: int = 90) -> Optional[dict]:
+        """
+        在注入环境变量后调用官方 run_experiment.py，解析 stdout 最终输出的 submission JSON。
+        """
+        runner_path = self._find_official_runner()
+        if not runner_path:
+            logger.error(f"ReproductionHandler: Official runner script not found for {case_id}")
+            return None
 
         env = os.environ.copy()
         env["RESEARCH_EXPERIMENT_CASE"] = case_id
         env["RESEARCH_WORKSPACE_TEAM"] = self.team_name
         env["RESEARCH_RESULT_ROOT"] = self.file_writer.root
+        env["RESEARCH_LAYERED_D"] = "layered-d-v3"
+        env["RESEARCH_D_SOURCE_PROVENANCE"] = "d-model-source-v1"
 
-        if is_online:
-            logger.info(f"ReproductionHandler: Online mode detected using {official_runner}")
-            cmd = [sys.executable, official_runner, "--case", case_id]
-        else:
-            logger.info("ReproductionHandler: Local offline mode detected")
-            local_script = self._find_local_script()
-            data_dir = self._find_data_dir()
+        cmd = [sys.executable, str(runner_path), "--case", case_id, "--implementation", str(impl_path)]
+        logger.info(f"ReproductionHandler: Invoking official runner: {' '.join(cmd)}")
 
-            if not local_script or not data_dir:
-                logger.error(f"ReproductionHandler: Materials missing for {case_id}")
-                return self._fallback(case_id, status="materials_missing")
-
-            # 验证对应题目的数据源文件是否存在
-            case_data_file = os.path.join(data_dir, f"{case_id}.json")
-            if not os.path.exists(case_data_file):
-                logger.error(f"ReproductionHandler: Case data file {case_data_file} not found")
-                return self._fallback(case_id, status="materials_missing")
-
-            task_id = self.TASK_IDS.get(case_id, f"TASK_{case_id.replace('-', '_')}_SINGLE_MACHINE")
-            cmd = [
-                sys.executable,
-                local_script,
-                "--case", case_id,
-                "--output", work_dir,
-                "--data", data_dir,
-                "--team", self.team_name,
-                "--run-id", f"run_{case_id}",
-                "--task-id", task_id
-            ]
-
-        # 2. 执行子进程调度，硬限 140 秒（预留 10 秒供双写核验与降级处理）
         try:
-            logger.info(f"ReproductionHandler: Invoking command: {' '.join(cmd)}")
             proc = subprocess.run(
                 cmd,
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=140
+                timeout=timeout
             )
-
-            # 解析执行过程中的事件流
-            events = self._parse_json_lines(proc.stdout)
-            logger.info(f"ReproductionHandler: Subprocess finished with returncode={proc.returncode}, captured {len(events)} events")
+            logger.info(f"ReproductionHandler: Runner exited with code {proc.returncode}")
 
             if proc.returncode != 0:
-                logger.error(f"ReproductionHandler: Execution failed (code {proc.returncode}): {proc.stderr}")
-                return self._fallback(case_id, status="failed")
+                logger.error(f"ReproductionHandler: Runner failed (code {proc.returncode}): {proc.stderr}")
+                # 依然尝试检查是否有 submission 文件由 runner 写入磁盘
+                disk_file = Path(self.file_writer.root) / "data" / self.team_name / f"{case_id}.json"
+                if disk_file.is_file():
+                    try:
+                        return json.loads(disk_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                return None
 
-            # 3. 定位并解析 submission.json
-            submission_data = self._locate_and_parse_submission(case_id, work_dir, proc.stdout)
-            if not submission_data:
-                logger.error("ReproductionHandler: submission.json not found or failed to parse")
-                return self._fallback(case_id, status="failed")
+            # 解析 stdout 中的最后一项有效 JSON
+            if proc.stdout:
+                for line in reversed(proc.stdout.strip().splitlines()):
+                    line = line.strip()
+                    if line.startswith("{") and line.endswith("}"):
+                        try:
+                            data = json.loads(line)
+                            if isinstance(data, dict) and "metrics" in data:
+                                return data
+                        except Exception:
+                            pass
 
-            # 确保 case_id 严格一致
-            submission_data["case_id"] = case_id
+            # 若 stdout 未解析到，尝试从磁盘输出读取
+            disk_file = Path(self.file_writer.root) / "data" / self.team_name / f"{case_id}.json"
+            if disk_file.is_file():
+                try:
+                    return json.loads(disk_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
 
-            # 4. 核验 PNG 图表真实性
-            if not self._verify_and_sync_figures(case_id, submission_data, work_dir, is_online=is_online):
-                logger.error(f"ReproductionHandler: Figure verification failed for {case_id}")
-                return self._fallback(case_id, status="failed")
+            return None
 
-            # 5. 计算 relative_error
-            for m in submission_data.get("metrics", []):
+        except subprocess.TimeoutExpired:
+            logger.error(f"ReproductionHandler: Runner timeout ({timeout}s exceeded) for {case_id}")
+            return None
+        except Exception as e:
+            logger.error(f"ReproductionHandler: Error invoking runner for {case_id}: {e}", exc_info=True)
+            return None
+
+    def _parse_submission_and_compute_errors(self, submission: dict, case_id: str) -> dict:
+        """
+        保留相对误差计算逻辑：当 reference!=0 且 observed!=None 时，
+        计算 relative_error = abs(obs - ref) / abs(ref)，否则置为 None。
+        """
+        submission["case_id"] = case_id
+        metrics = submission.get("metrics", [])
+        if isinstance(metrics, list):
+            for m in metrics:
+                if not isinstance(m, dict):
+                    continue
                 ref = m.get("reference")
                 obs = m.get("observed")
                 if ref is not None and ref != 0 and obs is not None:
-                    m["relative_error"] = abs(float(obs) - float(ref)) / abs(float(ref))
+                    try:
+                        m["relative_error"] = abs(float(obs) - float(ref)) / abs(float(ref))
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        m["relative_error"] = None
                 else:
                     m["relative_error"] = None
 
-            # 6. 添加指标覆盖率日志
-            for m in submission_data.get("metrics", []):
-                name = m.get("name", "?")
-                ref = m.get("reference")
-                obs = m.get("observed")
-                rel = m.get("relative_error")
-                rel_str = f"{rel:.4f}" if rel is not None else "None"
-                logger.info(f"[Metric] {name}: reference={ref}, observed={obs}, relative_error={rel_str}")
-
-            # 7. 使用 Pydantic 模型确保结构合规
-            validated = ReproductionOutput.model_validate(submission_data)
-            final_result = validated.model_dump()
-
-            # 8. 双写落盘至队伍产物目录并回读核验
-            rel_json_path = f"data/{self.team_name}/{case_id}.json"
-            self.file_writer.write_json_and_verify(rel_json_path, final_result)
-            logger.info(f"ReproductionHandler: Successfully completed reproduction for {case_id}")
-            return final_result
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"ReproductionHandler: Process timeout (140s exceeded) for {case_id}")
-            return self._fallback(case_id, status="failed")
-        except Exception as e:
-            logger.error(f"ReproductionHandler: Unexpected error during execution: {e}", exc_info=True)
-            return self._fallback(case_id, status="failed")
-
-    def _locate_and_parse_submission(self, case_id: str, work_dir: str, stdout_text: str) -> Optional[Dict[str, Any]]:
-        """从候选位置检索并解析 submission.json，确保 case_id 严格一致以支持并发多任务"""
-        candidate_paths = [
-            os.path.join(work_dir, "submission.json"),
-            os.path.join(self.file_writer.root, f"data/{self.team_name}/{case_id}.json"),
-            os.path.join(self.file_writer.root, "submission.json"),
-            os.path.join(f"/tmp/repro_{case_id}", "submission.json")
-        ]
-
-        for p in candidate_paths:
-            if os.path.isfile(p) and os.path.getsize(p) > 0:
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, dict) and data.get("status") == "completed":
-                        # 确保提取的数据归属于当前 case_id，防止多用例并发时读取交叉遗留产物
-                        if data.get("case_id") and data.get("case_id") != case_id:
-                            continue
-                        return data
-                except Exception as e:
-                    logger.debug(f"Failed to read submission from {p}: {e}")
-
-        # 尝试从 stdout 最后一行解析（线上 run_experiment.py 会将 submission 序列化打印到 stdout）
-        if stdout_text:
-            lines = [l.strip() for l in stdout_text.splitlines() if l.strip()]
-            for line in reversed(lines):
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        data = json.loads(line)
-                        if isinstance(data, dict) and "metrics" in data and "figures" in data:
-                            if data.get("case_id") and data.get("case_id") != case_id:
-                                continue
-                            return data
-                    except Exception:
-                        pass
-        return None
+        return submission
 
     def _verify_and_sync_figures(
         self,
         case_id: str,
         submission: Dict[str, Any],
-        work_dir: str,
+        work_dir: Path,
         is_online: bool = False
     ) -> bool:
         """
         核验 PNG 图表真实性：
-        1. 路径规范与实体文件存在性（若在 work 目录则同步复制到队伍公开目标目录）
-        2. 8 字节 PNG 真实二进制魔数核验
-        3. PIL 完整性校验（阻断空文件、损坏文件）
-        4. 元数据完整性核验：caption, x_label, y_label, legend 均不得为空
+        1. 存在性与路径安全性（禁止相对路径越界）；
+        2. 8 字节 PNG 魔数头；
+        3. PIL 完整性校验；
+        4. 元数据(caption, x_label, y_label, legend)齐全性。
         """
         figures = submission.get("figures", [])
         if not isinstance(figures, list) or len(figures) == 0:
             if not is_online:
-                logger.info(f"Local offline mode with empty figures allowed for {case_id}")
+                logger.info(f"ReproductionHandler: Empty figures allowed for {case_id}")
                 return True
-            logger.warning(f"No figures reported for {case_id}")
+            logger.warning(f"ReproductionHandler: No figures reported for {case_id}")
             return False
 
+        work_dir_str = str(work_dir)
         for fig in figures:
             if not isinstance(fig, dict):
                 return False
 
-            # 元数据完整性检查
             for field in ("caption", "x_label", "y_label", "legend"):
                 val = str(fig.get(field, "")).strip()
                 if not val:
-                    logger.error(f"Figure field '{field}' is missing or empty in {case_id}")
+                    logger.error(f"ReproductionHandler: Figure field '{field}' is missing or empty in {case_id}")
                     return False
 
             rel_path = fig.get("path", "")
             if not rel_path or ".." in rel_path:
-                logger.error(f"Invalid figure relative path: {rel_path}")
+                logger.error(f"ReproductionHandler: Invalid figure path: {rel_path}")
                 return False
 
-            # 寻找实际生成的图表源文件
             possible_source_paths = [
-                os.path.join(work_dir, rel_path),
+                os.path.join(work_dir_str, rel_path),
                 os.path.join(self.file_writer.root, rel_path),
-                os.path.join(work_dir, "data", "figure", self.team_name, f"{case_id}.png"),
-                os.path.join(self.file_writer.root, "data", "figure", self.team_name, f"{case_id}.png")
+                os.path.join(work_dir_str, "data", "figure", self.team_name, f"{case_id}.png"),
+                os.path.join(self.file_writer.root, "data", "figure", self.team_name, f"{case_id}.png"),
+                os.path.join("/data/experiment-results", rel_path),
             ]
 
             actual_src = None
@@ -257,29 +377,27 @@ class ReproductionHandler(BaseHandler):
                     break
 
             if not actual_src:
-                logger.error(f"Figure file not found anywhere for {rel_path}")
+                logger.error(f"ReproductionHandler: Figure file not found for {rel_path}")
                 return False
 
-            # 确保文件被同步拷贝到标准产物路径: self.file_writer.root / rel_path
             canonical_target = os.path.join(self.file_writer.root, rel_path)
             if os.path.abspath(actual_src) != os.path.abspath(canonical_target):
                 os.makedirs(os.path.dirname(canonical_target), exist_ok=True)
                 shutil.copyfile(actual_src, canonical_target)
 
-            # 核验目标文件真实性
             if not os.path.isfile(canonical_target) or os.path.getsize(canonical_target) == 0:
-                logger.error(f"Canonical figure target {canonical_target} missing or empty")
+                logger.error(f"ReproductionHandler: Canonical figure target {canonical_target} missing or empty")
                 return False
 
-            # 1. 8 字节 PNG 魔数校验
+            # 1. 8 字节 PNG 魔数头校验
             try:
                 with open(canonical_target, "rb") as f:
                     header = f.read(8)
                     if header != self.PNG_MAGIC_BYTES:
-                        logger.error(f"Figure {canonical_target} is not a valid PNG (invalid magic header: {header})")
+                        logger.error(f"ReproductionHandler: Figure {canonical_target} invalid magic: {header}")
                         return False
             except Exception as e:
-                logger.error(f"Error checking PNG magic bytes: {e}")
+                logger.error(f"ReproductionHandler: Error checking PNG magic bytes: {e}")
                 return False
 
             # 2. PIL 图像校验
@@ -288,7 +406,7 @@ class ReproductionHandler(BaseHandler):
                 with Image.open(canonical_target) as img:
                     img.verify()
             except Exception as e:
-                logger.error(f"PIL verification failed for {canonical_target}: {e}")
+                logger.error(f"ReproductionHandler: PIL verification failed for {canonical_target}: {e}")
                 return False
 
         return True
@@ -296,61 +414,80 @@ class ReproductionHandler(BaseHandler):
     def _fallback(self, case_id: str, status: str = "failed") -> Dict[str, Any]:
         """
         合规优雅降级输出：
-        绝不编造 observed 指标与图表，指标一律置为 null，图表置空。
-        同时落盘写入产物目录并回读核验。
+        三项指标 name/unit 优先对齐 protocol，数值置为 None，figures 置为空，拒绝捏造假数据，
+        落盘写入产物目录并回读核验。
         """
         logger.warning(f"ReproductionHandler: Fallback triggered for {case_id} with status '{status}'")
-        metric_items = []
-        specs = self.METRIC_SPECS.get(case_id)
-        if specs:
-            default_names = ["Macro-F1", "Accuracy", "运行时间"]
-            for idx, spec in enumerate(specs):
-                name = None
-                unit = "unit"
-                ref = None
 
-                if isinstance(spec, (list, tuple)):
-                    if len(spec) >= 3:
-                        name = str(spec[0])
-                        unit = str(spec[1])
-                        ref = float(spec[2]) if spec[2] is not None else None
-                    elif len(spec) == 2:
-                        if isinstance(spec[0], (int, float)):
-                            ref = float(spec[0])
-                            unit = str(spec[1])
-                            name = default_names[idx] if idx < len(default_names) else f"Metric_{idx+1}"
-                        else:
+        metric_items = []
+        materials = self._read_experiment_materials(case_id)
+        if "protocol" in materials:
+            try:
+                proto_data = json.loads(materials["protocol"])
+                metrics_spec = proto_data.get("metrics", [])
+                if isinstance(metrics_spec, list) and len(metrics_spec) == 3:
+                    for item in metrics_spec:
+                        metric_items.append({
+                            "name": item.get("name", "Metric"),
+                            "unit": item.get("unit", "unit"),
+                            "reference": None,
+                            "observed": None,
+                            "relative_error": None
+                        })
+            except Exception:
+                pass
+
+        if not metric_items:
+            specs = self.METRIC_SPECS.get(case_id)
+            if specs:
+                default_names = ["Macro-F1", "Accuracy", "运行时间"]
+                for idx, spec in enumerate(specs):
+                    name = None
+                    unit = "unit"
+                    ref = None
+
+                    if isinstance(spec, (list, tuple)):
+                        if len(spec) >= 3:
                             name = str(spec[0])
                             unit = str(spec[1])
+                            ref = float(spec[2]) if spec[2] is not None else None
+                        elif len(spec) == 2:
+                            if isinstance(spec[0], (int, float)):
+                                ref = float(spec[0])
+                                unit = str(spec[1])
+                                name = default_names[idx] if idx < len(default_names) else f"Metric_{idx+1}"
+                            else:
+                                name = str(spec[0])
+                                unit = str(spec[1])
+                                ref = None
+                        elif len(spec) == 1:
+                            name = str(spec[0])
+                            unit = "unit"
                             ref = None
-                    elif len(spec) == 1:
-                        name = str(spec[0])
-                        unit = "unit"
-                        ref = None
-                elif isinstance(spec, dict):
-                    name = spec.get("name")
-                    unit = spec.get("unit", "unit")
-                    ref = spec.get("reference")
+                    elif isinstance(spec, dict):
+                        name = spec.get("name")
+                        unit = spec.get("unit", "unit")
+                        ref = spec.get("reference")
 
-                if not name:
-                    name = f"Metric_{idx+1}"
+                    if not name:
+                        name = f"Metric_{idx+1}"
 
-                metric_items.append({
-                    "name": name,
-                    "unit": unit,
-                    "reference": ref,
-                    "observed": None,
-                    "relative_error": None
-                })
-        else:
-            for i in range(1, 4):
-                metric_items.append({
-                    "name": f"Metric_{i}",
-                    "unit": "unit",
-                    "reference": None,
-                    "observed": None,
-                    "relative_error": None
-                })
+                    metric_items.append({
+                        "name": name,
+                        "unit": unit,
+                        "reference": ref,
+                        "observed": None,
+                        "relative_error": None
+                    })
+            else:
+                for i in range(1, 4):
+                    metric_items.append({
+                        "name": f"Metric_{i}",
+                        "unit": "unit",
+                        "reference": None,
+                        "observed": None,
+                        "relative_error": None
+                    })
 
         fallback_result = {
             "case_id": case_id,
@@ -359,7 +496,6 @@ class ReproductionHandler(BaseHandler):
             "figures": []
         }
 
-        # 写入队伍目录并核验
         rel_json_path = f"data/{self.team_name}/{case_id}.json"
         try:
             self.file_writer.write_json_and_verify(rel_json_path, fallback_result)
@@ -368,44 +504,70 @@ class ReproductionHandler(BaseHandler):
 
         return fallback_result
 
-    def _find_local_script(self) -> Optional[str]:
-        """定位本地离线实验脚本 experiment.py"""
-        candidates = [
-            os.path.join(os.getcwd(), "research-experiments", "experiment.py"),
-            os.path.join(os.path.dirname(__file__), "..", "..", "research-experiments", "experiment.py"),
-            os.path.join(os.getcwd(), "research-experiments", "repo", "experiment.py"),
-            os.path.join(os.path.dirname(__file__), "..", "..", "research-experiments", "repo", "experiment.py"),
-        ]
-        for c in candidates:
-            abs_c = os.path.abspath(c)
-            if os.path.isfile(abs_c):
-                return abs_c
-        return None
+    def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
+        """
+        D 类复现任务主执行链路，在 180s 任务超时熔断预算内严格受控调度。
+        """
+        case_id = task.case_id.strip()
+        logger.info(f"ReproductionHandler: Starting reproduction task for {case_id}")
 
-    def _find_data_dir(self) -> Optional[str]:
-        """定位本地公开实验数据目录"""
-        candidates = [
-            os.path.join(os.getcwd(), "research-experiments", "publicdata"),
-            os.path.join(os.getcwd(), "research-experiments", "data"),
-            os.path.join(os.path.dirname(__file__), "..", "..", "research-experiments", "publicdata"),
-            os.path.join(os.path.dirname(__file__), "..", "..", "research-experiments", "data"),
-        ]
-        for c in candidates:
-            abs_c = os.path.abspath(c)
-            if os.path.isdir(abs_c):
-                return abs_c
-        return None
+        guard = TaskTimeoutGuard(case_id=case_id, timeout_seconds=175)
+        try:
+            with guard:
+                # 1. 材料源读取
+                materials = self._read_experiment_materials(case_id)
+                if not materials:
+                    logger.error(f"ReproductionHandler: Materials missing for {case_id}")
+                    return self._fallback(case_id, status="materials_missing")
 
-    def _parse_json_lines(self, stdout_text: str) -> List[Dict[str, Any]]:
-        """解析 stdout 中输出的 JSON Lines 事件"""
-        events = []
-        if not stdout_text:
-            return events
-        for line in stdout_text.splitlines():
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
+                # 2. 构造代码生成提示词
+                prompt = self._build_generation_prompt(case_id, materials, task_input=task.input)
+
+                work_dir = Path(self.file_writer.root) / f"data/{self.team_name}/work/{case_id}"
+                work_dir.mkdir(parents=True, exist_ok=True)
+
+                # 3. Gateway 请求模型生成代码（时限 60s）
                 try:
-                    events.append(json.loads(line))
-                except Exception:
-                    pass
-        return events
+                    response_json = self._call_platform_llm(prompt, work_dir=work_dir, timeout=60)
+                except Exception as e:
+                    logger.error(f"ReproductionHandler: LLM code generation failed for {case_id}: {e}")
+                    return self._fallback(case_id, status="failed")
+
+                # 4. 提取源码并落盘保存
+                try:
+                    impl_path = self._save_implementation(response_json, work_dir=work_dir)
+                except Exception as e:
+                    logger.error(f"ReproductionHandler: Failed to extract/save implementation for {case_id}: {e}")
+                    return self._fallback(case_id, status="failed")
+
+                # 5. 调用官方 runner 执行（时限 90s）
+                submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=90)
+                if not submission:
+                    logger.error(f"ReproductionHandler: Official runner failed or returned empty for {case_id}")
+                    return self._fallback(case_id, status="failed")
+
+                # 6. 计算相对误差 relative_error
+                submission = self._parse_submission_and_compute_errors(submission, case_id)
+
+                # 7. 核验 PNG 图表真实性
+                is_online = Path("/data/experiments/run_experiment.py").is_file()
+                if not self._verify_and_sync_figures(case_id, submission, work_dir=work_dir, is_online=is_online):
+                    logger.error(f"ReproductionHandler: Figure verification failed for {case_id}")
+                    return self._fallback(case_id, status="failed")
+
+                # 8. Pydantic 模型合规校验
+                validated = ReproductionOutput.model_validate(submission)
+                final_result = validated.model_dump()
+
+                # 9. 双写落盘至队伍产物目录并回读核验
+                rel_json_path = f"data/{self.team_name}/{case_id}.json"
+                self.file_writer.write_json_and_verify(rel_json_path, final_result)
+                logger.info(f"ReproductionHandler: Successfully completed reproduction for {case_id}")
+                return final_result
+
+        except TaskTimeoutException:
+            logger.error(f"ReproductionHandler: Task execution timed out (175s guard exceeded) for {case_id}")
+            return self._fallback(case_id, status="failed")
+        except Exception as e:
+            logger.error(f"ReproductionHandler: Unexpected error for {case_id}: {e}", exc_info=True)
+            return self._fallback(case_id, status="failed")
