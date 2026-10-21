@@ -276,3 +276,29 @@
 
 
 
+
+---
+
+## 九、v1.1.3 layered-d-v3 规范重构与 d-model-source-v1 来源验证
+
+> **完成时间**：2026-10-21 19:48  
+> **核心使命**：将 D 类（Reproduction）任务处理器从旧版本完全重构为赛事最新的 layered-d-v3 规范与 d-model-source-v1 来源验证标准，引入官方 Runner RPC 调度与大模型代码生成闭环。
+
+### 9.1 架构实现与核心方法
+1. **源码保存与凭据依赖**：引入 `app/core/model_source.py`（基于官方 `model_source.py`），提供 `save_source` / `extract_source`，严格约束 `finish_reason == "stop"`、单一 Python 3.9 代码块、`def run_experiment(request)` 存在性及 1..65536 字节尺寸校验。
+2. **重写 ReproductionHandler（573 行）**：
+   - `_read_experiment_materials(case_id: str) -> Dict[str, str]`：优先从 `/data/experiments/{case_id}` 读取 `method.md`, `protocol.json`, `sample.json`，缺省回退至 `research-experiments-v1/{case_id}`；若材料缺失则返回空字典触发合规降级；
+   - `_build_generation_prompt(case_id, materials, task_input, retry_reason)`：构建严密的 System/User Prompt，严格限定 Python 3.9 标准库算法，严禁外部网络请求与非标准库依赖，要求仅输出单一包含 `def run_experiment(request):` 的代码块；
+   - `_call_platform_llm(prompt, work_dir, timeout=60)`：调用赛事 Gateway 请求大模型生成代码，检测 `finish_reason == "length"` 截断并在时间充裕时执行 1 次重试提示；完整落盘保存原始 `generation-response.json`（不含私密凭据）；
+   - `_save_implementation(response, work_dir) -> Path`：安全提取并保存源码至工作目录 `implementation.py`；
+   - `_invoke_official_runner(case_id, impl_path, timeout=90) -> Optional[dict]`：注入 `RESEARCH_EXPERIMENT_CASE`, `RESEARCH_WORKSPACE_TEAM`, `RESEARCH_RESULT_ROOT`, `RESEARCH_LAYERED_D="layered-d-v3"`, `RESEARCH_D_SOURCE_PROVENANCE="d-model-source-v1"`，子进程调用官方 `run_experiment.py`，解析 stdout 答卷 JSON；
+   - `_parse_submission_and_compute_errors(submission, case_id) -> dict`：精准计算相对误差 `relative_error = abs(obs - ref) / abs(ref)`（当 `ref != 0` 且 `obs != None` 时，其余置 `None`）；
+   - `_verify_and_sync_figures(case_id, submission, work_dir, is_online) -> bool`：深度核验 8 字节 PNG 魔数头、PIL 完整性及元数据字段齐全性；
+   - `_fallback(case_id, status="failed") -> dict`：三项指标规范对齐 protocol，`observed` 坚决置为 `None`，`figures` 置空，落盘并核验回读；
+   - `handle(task, session_id) -> Dict[str, Any]`：组装全链路，兼顾本地离线与生产线上环境，严格受控于 175s 超时熔断保护。
+
+### 9.2 自动化测试与全量回归
+* **D 类专项测试适配**：重写 `tests/test_reproduction_and_breaker.py` 与 `tests/test_reproduction_metrics.py`，全量覆盖正常流程、材料缺失降级、模型截断重试、runner 失败降级、损坏图表拦截、并发多任务与误差计算。
+* **全量回归验证**：
+  `PYTHONPATH=. pytest tests/ -v`
+  **53 passed / 53 passed (100% PASS)**，零失败零报错。
