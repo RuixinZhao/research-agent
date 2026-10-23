@@ -98,6 +98,7 @@ class ReproductionHandler(BaseHandler):
         """
         构造严格的代码生成提示词，严禁外部网络请求与非标准库依赖，
         要求仅输出一个包含 def run_experiment(request): 的 ```python 代码块。
+        严格确保 Python 3.9 语法兼容性（严禁 match-case，严禁类型联合 '|'）。
         """
         method = materials.get("method", "")
         protocol = materials.get("protocol", "")
@@ -118,25 +119,52 @@ class ReproductionHandler(BaseHandler):
         elif case_id == "D-02":
             case_hints = (
                 "【D-02 核心实现要点】:\n"
-                "1. 分词与正则：小写正则 `[a-z0-9]+`，正文与标题分别建库与计算 IDF；\n"
-                "2. BM25 打分：Total Score = Score_text + title_weight * Score_title；\n"
-                "3. 排序规则：所有文档按 (-score, id) 升序排列；\n"
-                "4. 选参策略 (phase=='run')：网格搜索 27 组超参，优先级依次为：worst_mrr_at_10 最大 -> macro_mrr_at_10 最大 -> macro_recall_at_5_percent 最大 -> (title_weight, k1, b) 升序；\n"
-                "5. 阶段区分：phase=='run' 返回 baseline、candidate 及 details.selected / search；phase=='rank' 直接使用输入 data.selected 排序，不重新选参。"
+                "1. 配置读取：直接从 `request['protocol']['grid']` 读取 27 组配置（若无则按 k1 in [0.4, 1.2, 2.0], b in [0.0, 0.5, 1.0], title_weight in [0.0, 0.5, 2.0] 遍历）；默认配置直接读取 `request['protocol']['default_config']`（默认 {'k1': 1.2, 'b': 0.75, 'title_weight': 0.0}）。不要在代码中硬编码 27 个冗长字典！\n"
+                "2. 分词与BM25统计：\n"
+                "   - 正则小写分词：re.findall(r'[a-z0-9]+', text.lower())；\n"
+                "   - 标题与正文分别建立 df 与文档长度统计，N为文档总数（含空字段），avg_length 为字段总长度/N（若为0则按1.0计算）；\n"
+                "   - 词得分 = math.log(1.0 + (N - df + 0.5) / (df + 0.5)) * (f * (k1 + 1.0)) / (f + k1 * (1.0 - b + b * length / avg_length))；\n"
+                "   - 总得分 = text_score + title_weight * title_score；文档按 (-score, id) 升序排列；\n"
+                "3. 选参策略 (phase=='run')：\n"
+                "   - Recall@5 = 前5篇文档中唯一命中相关文档数 / 该查询全部相关文档数 * 100；\n"
+                "   - MRR@10 = 前10篇中首个相关位置倒数 (1/(rank+1))，未命中为 0.0；\n"
+                "   - 对每个配置，按 dev 查询 group 计算各组内部均值，再求组等权 macro_mrr_at_10, macro_recall_at_5_percent 以及 worst_mrr_at_10 = min(各组MRR)；\n"
+                "   - 选参优先级：round(worst_mrr_at_10, 12) 最大 -> round(macro_mrr_at_10, 12) 最大 -> round(macro_recall_at_5_percent, 12) 最大 -> (title_weight, k1, b) 升序；\n"
+                "4. 阶段区分：\n"
+                "   - phase=='run': 返回 {'baseline': baseline_rankings, 'candidate': best_candidate_rankings, 'details': {'selected': best_config, 'search': search_records}}；\n"
+                "   - phase=='rank': 直接使用输入 request['data']['selected'] 排序所有测试查询，返回 {'candidate': test_rankings}，绝不重新选参。"
             )
         elif case_id == "D-05":
             case_hints = (
                 "【D-05 核心实现要点】:\n"
-                "1. 离散事件非抢占式调度：同一时刻顺序执行：释放已完成任务 -> 纳入新到达任务 -> 丢弃超时等待任务 -> 空闲服务端派发；\n"
-                "2. 调度策略：baseline 采用 FIFO (arrival_ms, id 最小出队)；candidate 采用加权公平 (allocated_service / flow_weight, arrival_ms, id 最小出队)，一旦派发立即计入预留服务量；\n"
-                "3. 开销与淘汰：跨流切换加收 setup_ms；start >= deadline 丢弃为 deadline；end > horizon 丢弃为 horizon；end == horizon 允许完成；\n"
-                "4. 守恒性：每项任务恰好进入 trace 或 dropped 一次，不重不漏。"
+                "1. 离散事件非抢占式调度：\n"
+                "   - 任务含 id, flow, arrival_ms, service_ms, deadline_ms；\n"
+                "   - 维护 servers 个服务端（编号 0..servers-1），记录每个服务端的 idle_at 与 current_flow（初始 0 与 None）；\n"
+                "   - 推进当前时刻 now 到下一个关键事件（任务到达或服务端空闲）；\n"
+                "   - 在时刻 now 严格按顺序：\n"
+                "     a. 释放已完成任务（idle_at <= now 的服务端设为空闲）；\n"
+                "     b. 纳入新到达任务（arrival_ms <= now 的任务加入等待队列）；\n"
+                "     c. 丢弃超时等待任务（等待队列中 deadline_ms <= now 的任务移出并记入 dropped，reason='deadline'）；\n"
+                "     d. 按编号升序遍历空闲服务端派发：\n"
+                "        - FIFO: 按 (arrival_ms, id) 升序出队；\n"
+                "        - Fair: 按 (allocated_service[flow] / flow_weight[flow], arrival_ms, id) 升序出队，一旦派发立即 allocated_service[flow] += service_ms；\n"
+                "        - 切换开销：若该服务端 current_flow != None 且 != task['flow']，加收 setup_ms，否则 setup=0；\n"
+                "        - start_ms = now + setup, end_ms = start_ms + service_ms, wait_ms = start_ms - arrival_ms；\n"
+                "        - 若 start_ms >= deadline_ms：丢弃该任务（reason='deadline'），该服务端继续尝试后续任务；\n"
+                "        - 否则若 end_ms > horizon：丢弃该任务（reason='horizon'），该服务端继续尝试后续任务；\n"
+                "        - 否则执行成功：加入 trace，更新该服务端 idle_at = end_ms, current_flow = task['flow']；\n"
+                "   - 到达 horizon 停止派发，剩余等待队列中未派发任务全部记入 dropped（reason='horizon'）；\n"
+                "2. 守恒性与返回：每项任务恰好归属 trace 或 dropped 一次。返回 {'baseline': baseline_result, 'candidate': fair_result, 'details': {}}。"
             )
 
         prompt = (
             "请根据以下公开方法和协议，自行实现完整的Python3.9标准库算法。\n"
             "必须定义 def run_experiment(request): 函数，不得联网、打印日志或读取隐藏标签。\n"
-            "只返回一个完整的```python代码块，不要省略函数、返回补丁或拆分成多段。\n\n"
+            "【代码风格与安全硬约束】\n"
+            "1. 仅使用 Python 3.9 标准库（如 math, re, json, collections, heapq 等）。严禁导入任何第三方库！\n"
+            "2. 严禁使用 Python 3.10+ 新语法（严禁 match-case 语句，类型注解严禁使用 '|' 联合类型）。代码必须完全兼容 ast.parse(..., feature_version=(3,9))！\n"
+            "3. 只返回一个完整的 ```python ... ``` 代码块，包含 def run_experiment(request): 及所有必要函数。代码块外严禁任何闲聊或说明文字，严禁提供示例调用或测试代码！\n"
+            "4. 代码紧凑高效，不要冗余长篇注释，确保在单一代码块内完整闭合输出。\n\n"
             f"【任务信息】\n{input_desc}\n\n"
             + (f"{case_hints}\n\n" if case_hints else "") +
             f"【公开方法 (method.md)】\n{method}\n\n"
@@ -152,11 +180,10 @@ class ReproductionHandler(BaseHandler):
 
         return prompt
 
-    def _call_platform_llm(self, prompt: str, work_dir: Path, session_id: Optional[str] = None, timeout: int = 80) -> dict:
+    def _call_platform_llm(self, prompt: str, work_dir: Path, session_id: Optional[str] = None, timeout: int = 100) -> dict:
         """
         使用 httpx 调用赛事 Gateway 请求大模型生成代码，检查 finish_reason=='stop'。
         严格携带 X-Session-ID 请求头，以满足赛事平台 d-model-source-v1 来源审计核验。
-        若遇截断 (finish_reason=='length') 且时间充裕，执行 1 次重试提示。
         完整保存 generation-response.json（不包含请求头或 API Key）。
         """
         base_url = (
@@ -195,13 +222,14 @@ class ReproductionHandler(BaseHandler):
             "X-Session-ID": current_session,
         }
 
+        # 限制 max_tokens=2800：代码极简紧凑，防止冗余闲聊/长注释导致耗尽80-90秒或被截断
         payload = {
             "model": model,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
-            "max_tokens": 4096,
+            "max_tokens": 2800,
             "stream": False,
         }
 
@@ -210,12 +238,14 @@ class ReproductionHandler(BaseHandler):
         response_file = work_dir / "generation-response.json"
 
         def _do_request(body_data: dict, req_timeout: int) -> dict:
-            with httpx.Client(timeout=req_timeout) as client:
+            # 明确指定 connect, read, write, pool 超时，read 超时给予充分预算
+            timeout_cfg = httpx.Timeout(connect=10.0, read=float(req_timeout), write=10.0, pool=10.0)
+            with httpx.Client(timeout=timeout_cfg) as client:
                 resp = client.post(endpoint, json=body_data, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
 
-        # 首次调用
+        # 发起调用
         data = _do_request(payload, timeout)
         response_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -289,12 +319,20 @@ class ReproductionHandler(BaseHandler):
         try:
             proc = subprocess.run(
                 cmd,
+                cwd=str(runner_path.parent),
                 env=env,
                 capture_output=True,
                 text=True,
                 timeout=timeout
             )
             logger.info(f"ReproductionHandler: Runner exited with code {proc.returncode}")
+
+            # 保存完整 runner 执行日志供追溯
+            try:
+                log_path = impl_path.parent / "runner.log"
+                log_path.write_text(f"EXIT: {proc.returncode}\n\nSTDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}", encoding="utf-8")
+            except Exception:
+                pass
 
             if proc.returncode != 0:
                 logger.error(f"ReproductionHandler: Runner failed (code {proc.returncode}): {proc.stderr}")
@@ -338,8 +376,7 @@ class ReproductionHandler(BaseHandler):
 
     def _parse_submission_and_compute_errors(self, submission: dict, case_id: str) -> dict:
         """
-        保留相对误差计算逻辑：当 reference!=0 且 observed!=None 时，
-        计算 relative_error = abs(obs - ref) / abs(ref)，否则置为 None。
+        补齐相对误差：当官方答卷未填 (is None) 时按公式计算，已填时严格保持官方计算结果。
         """
         submission["case_id"] = case_id
         metrics = submission.get("metrics", [])
@@ -347,15 +384,17 @@ class ReproductionHandler(BaseHandler):
             for m in metrics:
                 if not isinstance(m, dict):
                     continue
-                ref = m.get("reference")
-                obs = m.get("observed")
-                if ref is not None and ref != 0 and obs is not None:
-                    try:
-                        m["relative_error"] = abs(float(obs) - float(ref)) / abs(float(ref))
-                    except (ValueError, TypeError, ZeroDivisionError):
+                # 仅当未填时补齐，已填时严格保留官方结果
+                if m.get("relative_error") is None:
+                    ref = m.get("reference")
+                    obs = m.get("observed")
+                    if ref is not None and ref != 0 and obs is not None:
+                        try:
+                            m["relative_error"] = abs(float(obs) - float(ref)) / abs(float(ref))
+                        except (ValueError, TypeError, ZeroDivisionError):
+                            m["relative_error"] = None
+                    else:
                         m["relative_error"] = None
-                else:
-                    m["relative_error"] = None
 
         return submission
 
@@ -565,27 +604,57 @@ class ReproductionHandler(BaseHandler):
                 work_dir = Path(self.file_writer.root) / f"data/{self.team_name}/work/{case_id}"
                 work_dir.mkdir(parents=True, exist_ok=True)
 
-                # 3. Gateway 请求模型生成代码（时限 80s，严格携带 session_id 用于来源审计）
-                try:
-                    import inspect
+                # 3. 动态时间预算分配：
+                # D-05 runner 运行约 65-70s，预留 75s；D-01/D-02 预留 25s；另预留 5s 写入与返回
+                case_runner_reserve = {"D-01": 25, "D-02": 25, "D-05": 75}
+                runner_reserve = case_runner_reserve.get(case_id, 30)
+                rem = guard.remaining_time()
+                llm_timeout = int(max(60, min(115, rem - runner_reserve - 5)))
+                logger.info(f"ReproductionHandler: Allocated LLM timeout {llm_timeout}s for {case_id} (runner reserve: {runner_reserve}s)")
+
+                import inspect
+                def _invoke_llm_safe(prompt_text: str, timeout_sec: int) -> dict:
                     sig = inspect.signature(self._call_platform_llm)
+                    kwargs = {"work_dir": work_dir, "timeout": timeout_sec}
                     if "session_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                        response_json = self._call_platform_llm(prompt, work_dir=work_dir, session_id=session_id, timeout=80)
-                    else:
-                        response_json = self._call_platform_llm(prompt, work_dir=work_dir, timeout=80)
+                        kwargs["session_id"] = session_id
+                    return self._call_platform_llm(prompt_text, **kwargs)
+
+                # Gateway 请求模型生成代码（严格携带 session_id 用于来源审计）
+                try:
+                    response_json = _invoke_llm_safe(prompt, timeout_sec=llm_timeout)
                 except Exception as e:
                     logger.error(f"ReproductionHandler: LLM code generation failed for {case_id}: {e}")
                     return self._fallback(case_id, status="failed")
 
-                # 4. 提取源码并落盘保存
+                # 4. 提取源码并落盘保存；若提取失败且时间允许，尝试使用错误信息向模型快速请求修复
+                impl_path = None
                 try:
                     impl_path = self._save_implementation(response_json, work_dir=work_dir)
                 except Exception as e:
-                    logger.error(f"ReproductionHandler: Failed to extract/save implementation for {case_id}: {e}")
-                    return self._fallback(case_id, status="failed")
+                    logger.warning(f"ReproductionHandler: First source extraction failed for {case_id}: {e}")
+                    rem = guard.remaining_time()
+                    if rem > runner_reserve + 35:
+                        logger.info(f"ReproductionHandler: Retrying code generation with error feedback (rem={rem:.1f}s)")
+                        retry_prompt = prompt + (
+                            f"\n\n【重要修复提示】前次生成的代码无法通过 Python 3.9 语法及唯一实现提取校验，具体错误：{str(e)}。\n"
+                            "请严格修正语法（严禁 match-case，严禁 typing 联合 '|'），只输出一个包含完整实现的单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
+                        )
+                        retry_timeout = int(min(rem - runner_reserve - 5, 60))
+                        try:
+                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=retry_timeout)
+                            impl_path = self._save_implementation(response_json, work_dir=work_dir)
+                        except Exception as e2:
+                            logger.error(f"ReproductionHandler: Retry code extraction also failed for {case_id}: {e2}")
+                            return self._fallback(case_id, status="failed")
+                    else:
+                        logger.error(f"ReproductionHandler: Insufficient time for retry ({rem:.1f}s remaining)")
+                        return self._fallback(case_id, status="failed")
 
-                # 5. 调用官方 runner 执行（时限 90s）
-                submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=90)
+                # 5. 调用官方 runner 执行（分配所有可用剩余时间）
+                runner_timeout = int(max(20, guard.remaining_time() - 3))
+                logger.info(f"ReproductionHandler: Invoking official runner with timeout {runner_timeout}s for {case_id}")
+                submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=runner_timeout)
                 if submission and isinstance(submission, dict) and "metrics" in submission:
                     logger.info(f"ReproductionHandler: Official runner succeeded for {case_id}")
                     # 补齐相对误差（当未填时按公式计算，已填时严格保持官方计算结果）

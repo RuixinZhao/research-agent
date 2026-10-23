@@ -754,3 +754,86 @@ def test_figures_empty_allowed_in_local_offline_mode():
     handler = ReproductionHandler()
     assert handler._verify_and_sync_figures("D-01", {"figures": []}, Path("/tmp"), is_online=False) is True
     assert handler._verify_and_sync_figures("D-01", {"figures": []}, Path("/tmp"), is_online=True) is False
+
+
+def test_reproduction_syntax_retry_flow(isolated_repro_env, monkeypatch):
+    """
+    验证代码提取遇语法错误（如 match-case 导致 Python 3.9 AST 失败）时的重试修复机制：
+    第一次调用返回无效语法，第二次调用返回有效 Python 3.9 代码，最终实验顺利完成。
+    """
+    output_dir, team = isolated_repro_env
+    handler = ReproductionHandler()
+
+    llm_call_count = 0
+    prompts_seen = []
+
+    def mock_call_llm(prompt, work_dir, session_id=None, timeout=60):
+        nonlocal llm_call_count
+        llm_call_count += 1
+        prompts_seen.append(prompt)
+        if llm_call_count == 1:
+            # 第一次返回包含 match-case 的 Python 3.10 语法代码（无法被 Python 3.9 AST 解析）
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "```python\ndef run_experiment(request):\n    match request.get('phase'):\n        case 'run': return {}\n```"
+                    }
+                }]
+            }
+        else:
+            # 第二次修复返回合规 Python 3.9 代码
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "```python\ndef run_experiment(request):\n    if request.get('phase') == 'run': return {}\n    return {}\n```"
+                    }
+                }]
+            }
+
+    monkeypatch.setattr(handler, "_call_platform_llm", mock_call_llm)
+
+    fig_rel = f"data/figure/{team}/D-01.png"
+    fig_full = output_dir / fig_rel
+    fig_full.parent.mkdir(parents=True, exist_ok=True)
+    fig_full.write_bytes(VALID_PNG_BYTES)
+
+    def mock_runner(cid, impl_path=None, timeout=90, **kwargs):
+        return {
+            "case_id": cid,
+            "status": "completed",
+            "metrics": [
+                {"name": "Macro-F1", "unit": "分数", "reference": None, "observed": 0.85, "relative_error": None},
+                {"name": "Accuracy", "unit": "%", "reference": None, "observed": 91.2, "relative_error": None},
+                {"name": "运行时间", "unit": "秒", "reference": None, "observed": 12.3, "relative_error": None}
+            ],
+            "figures": [{
+                "path": fig_rel,
+                "caption": "实验真实曲线 D-01",
+                "x_label": "Epoch",
+                "y_label": "Loss",
+                "legend": "Baseline"
+            }]
+        }
+
+    monkeypatch.setattr(handler, "_invoke_official_runner", mock_runner)
+
+    task = ChallengeTaskInput(
+        case_id="D-01",
+        function="Reproduction",
+        title="D-01 语法自愈重试测试",
+        input="测试语法错误重试机制",
+        materials=[],
+        constraints=[],
+        expected_output="completed",
+        output_schema_ref="Reproduction"
+    )
+
+    result = handler.handle(task, session_id="test-retry-syntax")
+    assert result["status"] == "completed"
+    assert llm_call_count == 2, f"Expected 2 LLM calls (1 initial + 1 retry), got {llm_call_count}"
+    assert "致命错误修复提示" in prompts_seen[1] or "重要修复提示" in prompts_seen[1]
+
