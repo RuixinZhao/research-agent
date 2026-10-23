@@ -112,7 +112,8 @@
      - `_invoke_official_runner` 增加 `cwd=runner_path.parent`，并自动捕获并落盘 `runner.log`（包含完整 STDOUT 与 STDERR）；
      - `_parse_submission_and_compute_errors` 严格遵循“未填时计算、已填时原样保留”，杜绝覆盖官方评测结果；
   6. **全套自测与提交预检 100% PASS**：
-     - `pytest tests/` 53 项单元与集成测试全部 PASS。
+     - `pytest tests/` 53 项单元与集成测试全部 PASS；
+     - Docker 镜像打包成功（`Linux/AMD64`，`research-agent-v1.2.2.tar` SHA256: `dc1f3dc559cdca316abd6ee5fb1a729a17c4bd8b84eb49105d8f8db39c4eda2e`）。
 
 ---
 
