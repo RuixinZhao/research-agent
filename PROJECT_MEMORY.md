@@ -354,3 +354,39 @@
 * **Dev 分支最新提交**：`bd0ec9b` (chore: bump app version to 1.2.0 in server and web router)
 * **Main 分支合并**：`95bcbf0` (`merge(dev→main): release v1.2.0 with layered-d-v3 support, verified D-class algorithms and web console`)
 * **Git 发布 Tag**：`v1.2.0` 已同步推送至 GitHub 远程仓库 (`origin/v1.2.0`)。
+
+---
+
+## 十一、v1.2.1 针对平台评测异常与最新 D 包深度修复交付 (Release v1.2.1)
+
+> **发布时间**：2026-10-23 20:45  
+> **负责人**：资深 QA 工程师兼 Release Manager  
+> **生产发布 Tag**：`v1.2.1`  
+> **镜像包归档**：
+> - `research-agent-v1.2.1.tar` (203 MB, sha256: `0bc06fbd57df840ed16678375994d0bf9d11619e7e46a5c06f2f4a6bba667c92`)
+> - `research-agent-v1.2.1.tar.gz` (202 MB, sha256: `a1ea2a7a3c4155944522ee1bdf970162bb67271fa46311917338291433a7049d`)
+
+### 11.1 修复清单与核心突破
+1. **彻底攻克 E-02 任务超时 (3m9s 报错)**：
+   - 接入 165s 信号硬熔断保护器 (`TaskTimeoutGuard`)，并在网关层将最大重试收敛至 2 次、读取时限设为 70s；
+   - 将 `max_tokens` 压减至 2200（生成 ~2000 汉字，完全满足 $\ge 800$ 字要求），实测耗时由 189s 压缩至 68s，彻底消除 180s 被杀死问题。
+2. **攻克 B-02/B-03 检索 0 分与 B-01 低分**：
+   - 解决中文查询在纯英文论文库中 BM25 零命中的跨语言障碍，引入轻量双语关键词自动扩展与文件名关键词第 0 页索引；
+   - 移除 `<= 10` 候选规模限制，自动增补候选至 15 篇，强制移交大模型否定排他防火墙进行细粒度双语审查，告别 0 调用与 0 召回。
+3. **C-01/C-03 输出规范与网关环境对齐**：
+   - 剥离文末 `## 参考文献` 独立保护，消除了正文锚点正则误将参考文献条目篡改为页码的致命缺陷；
+   - 动态优先读取平台环境变量 `PLATFORM_LLM_URL` 与 `PLATFORM_API_KEY`，解决离线沙箱直连公网失败。
+4. **D-01/D-02/D-05 来源审计对齐**：
+   - Gateway 调用严格发送 `X-Session-ID`，保留 URL 参数并对齐单条 Prompt 规范，解决 `D_SOURCE_NOT_GENERATED_THIS_SESSION`；
+   - 官方 Runner 执行产物全量保留，避免被占位失败答卷篡改覆盖。
+
+### 11.2 Docker 交付镜像构建与冒烟验证
+* **构建指令**：`docker build --platform linux/amd64 -t research-agent:v1.2.1 -t research-agent:latest .`
+* **基础镜像**：`agenthack/base:1.1.1` (Linux/AMD64, 非 root `agent` 用户)
+* **容器实测验证**：
+  - `GET /health`：HTTP 200 OK，`{"status":"ok"}`；
+  - 运行时用户：`agent` (非 root 安全受限账号)；
+  - 输出目录权限：`/output` 可写测试通过；
+* **测试与预检总览**：
+  - `pytest tests/`：52 项测试 100% PASS；
+  - `validate_submission.py team`：25 题全集预检 100% PASS。
