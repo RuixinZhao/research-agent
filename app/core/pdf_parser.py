@@ -14,6 +14,28 @@ class StreamPDFParser:
     """
 
     @staticmethod
+    def get_page_count(pdf_path: str) -> int:
+        """快速获取 PDF 物理总页数"""
+        if not os.path.exists(pdf_path):
+            return 1
+        doc = None
+        try:
+            doc = fitz.open(pdf_path)
+            count = len(doc)
+            return max(1, count)
+        except Exception as e:
+            logger.warning(f"获取 PDF 总页数异常 [{pdf_path}]: {e}")
+            return 1
+        finally:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+                del doc
+            gc.collect()
+
+    @staticmethod
     def extract_pages(
         pdf_path: str,
         max_pages: Optional[int] = None,

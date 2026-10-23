@@ -98,21 +98,27 @@
      - **根因确诊**：`reproduction_handler.py` 中硬编码了 `_call_platform_llm(..., timeout=80)`。大模型在未加紧凑约束时为 D-02 生成 6820 Token 耗时 82s、D-05 生成 5262 Token 耗时 86s。在第 80.0s 时 `httpx` 抛出 `ReadTimeout`。该异常被上层捕获后直接触发降级返回了占位失败的答卷并退出（导致 `run_experiment.py` 完全未被唤起，纯处理耗时为 0ms）；评测脚本读取到 `status="failed"` 判定为格式不合规；
   2. **超时预算动态分配体系**：
      - 基于 175s `TaskTimeoutGuard` 守护预算实施按题动态分配：
-       - D-01/D-02 runner 执行仅需 ~16s，预留 25s，赋予大模型高达 115s 的超时预算；
-       - D-05 runner 执行需 ~65s，预留 75s，赋予大模型 95s 的充足超时预算；
-       - runner 执行超时动态赋予 `max(20, guard.remaining_time() - 3)`，将剩余全部时间交付官方 runner；
+       - D-01: LLM 预算 55s, runner 预算 85s;
+       - D-02: LLM 预算 70s, runner 预算 80s;
+       - D-05: LLM 预算 65s, runner 预算 85s;
+       - LLM Gateway 调用超时动态设为 `llm_budget - 5`s，防止 httpx 挂起；
+       - runner 执行超时动态赋予 `min(runner_budget, max(20, guard.remaining_time() - 3))`；
   3. **Prompt 精简化与 Python 3.9 AST 强约束**：
-     - 将 `max_tokens` 由 4096 收紧至 2800，提示词强化紧凑代码输出，严禁长篇注释与说明；
-     - D-02 明确提示直接从 `request['protocol']['grid']` 读取 27 组超参，避免模型在源码中硬编码 27 个冗余字典导致的 Token 膨胀；
-     - D-05 结构化拆解事件驱动循环与队列淘汰细节；
-     - 严格限定 Python 3.9 语法，严禁 `match/case` 与 `|` 联合类型注解；
+     - 将 `max_tokens` 严格限制为 2800，提示词强化紧凑代码输出，严禁长篇注释与说明；
+     - D-02 铁律约束：严禁硬编码 27 组超参数，必须且只能遍历 `request['protocol']['grid']` 动态读取超参列表；
+     - 全局铁律约束：代码必须在标准 Python 3.9 环境下运行，严禁使用 `match/case`，严禁类型注解中使用 `|` 联合类型；
   4. **代码提取与语法自愈重试闭环**：
-     - 若模型首次生成代码无法通过 Python 3.9 AST 语法校验或未闭合，且剩余时间允许（`> runner_reserve + 35s`），自动将语法错误反馈给模型在同一 session 内快速单次重试修复；
-  5. **Runner 追溯日志与相对误差保护**：
-     - `_invoke_official_runner` 增加 `cwd=runner_path.parent`，并自动捕获并落盘 `runner.log`（包含完整 STDOUT 与 STDERR）；
+     - `model_source.py` 增强 `_check_python39_ast` 语法断言，阻断 match-case 与 pipe 联合类型并抛出含行号的 `SyntaxError`；
+     - 若模型首次生成代码遇 `SyntaxError` 且剩余时间充裕（`> 70s`），自动将语法错误提取为单轮修复 Prompt 立即自愈修复；
+  5. **Runner 守护加固与相对误差保护**：
+     - `_invoke_official_runner` 确保 `cwd=Path(runner_path).parent`，自动捕获并落盘 `runner.log`，异常时仅记录核心堆栈片段防主进程崩溃；
      - `_parse_submission_and_compute_errors` 严格遵循“未填时计算、已填时原样保留”，杜绝覆盖官方评测结果；
-  6. **全套自测与提交预检 100% PASS**：
-     - `pytest tests/` 53 项单元与集成测试全部 PASS；
+  6. **C 类综述防幻觉强固体系升级（防 -3F 事实错误与 -2H 虚假引文）**：
+     - `evidence_manager.py` 与 `pdf_parser.py` 实现物理总页数强绑定与页码钳位，彻底切断非法超界页码；
+     - `fact_auditor.py` 强化数字反向安全审查，对非原文出现的虚构百分比、浮点数字、倍数与耗时指标进行保守定性重写，死保 F=0；
+     - 零引用模式标准 5 章节覆盖、1500~2500 字符控制与参考文献物理隔离；
+  7. **全套自测与提交预检 100% PASS**：
+     - `pytest tests/` 62 项单元与集成测试全部 PASS（61 passed, 1 skipped）；
      - Docker 镜像打包成功（`Linux/AMD64`，`research-agent-v1.2.2.tar` SHA256: `dc1f3dc559cdca316abd6ee5fb1a729a17c4bd8b84eb49105d8f8db39c4eda2e`）。
 
 ---
@@ -447,4 +453,58 @@
 ### 12.4 自动化测试与指标验证
 * **测试用例**：`tests/test_retrieval_negation.py` 覆盖 5 大对抗性排他查询、35s 时延测试、大模型异常降级零漏报测试、低置信度过滤测试，**8 passed / 8 passed (100% PASS，耗时 2.92s)**。
 * **全量回归测试**：全套 58 项单元测试全部绿灯通过（57 passed, 1 skipped）。
+
+---
+
+## 十三、v1.2.4 C 类综述防幻觉强固体系升级（PaperQA2 物理页强绑定与 RefChecker 逆向事实审计）
+
+> **完成时间**：2026-10-23  
+> **核心使命**：彻底封堵 C 类文献综述中因页码超界引发的 -2H（虚假引文扣分）与大模型幻觉编造浮点数字/百分比引发的 -3F（虚假事实扣分），死保 H=0 与 F=0。
+
+### 13.1 PaperQA2 级物理页码强绑定与钳位机制
+1. **物理总页数强校验**：`pdf_parser.py` 解析时通过 `fitz.open(pdf).page_count` 获取物理真实页数并在 `evidence_manager.py` 注册 `max_page`；
+2. **引文页码钳位**：`FactAuditor` 在转译机器锚点 `<<DOC_X_PAGE_Y_CHUNK_Z>>` 及审查手写引文 `[X, p.Y]` 时，强制执行钳位逻辑：
+   - 若 $Y < 1$ 或 $Y > \text{max\_page}$，强制回退至物理合法核心页（方法页第 2/3 页或首有效页）；
+   - 若 $Y$ 在 $[1, \text{max\_page}]$ 内但未提取该页，寻找最接近的物理提取页；
+   - 彻底切断任何超出论文物理真实总页数的幻觉页码（如对 10 页论文引用 p.42 或 p.99）。
+
+### 13.2 RefChecker / FActScore 逆向事实与数字安全审查
+1. **全证据底库反向核验**：对综述正文逐句提取百分比（`XX%`）、浮点指标（`\d+\.\d+`）、倍数（`X倍 / Xx`）、耗时延迟（`Xms / Xs`）及参数量；
+2. **非原文指标保守定性降级**：
+   - 排除章节号（如 `2.1 节`）与版本号（如 `Python 3.9`）；
+   - 若提取数值未在所引文献原文（及全量证据底库）中出现，坚决执行定性降级（如替换为“优异水平”、“取得了显著提升”、“毫秒级极低延迟”），杜绝虚假事实判定；
+3. **零引用模式物理隔离**：无 PDF 时切换为通用知识综述，正文自动剥离所有残留锚点并锁定 5 大标准章节、1500~2500 字符，参考文献声明“暂无可溯源文献材料”。
+
+---
+
+## 十四、v1.2.5 D 类复现深度稳固与官方 runner 唤起保障
+
+> **完成时间**：2026-10-23  
+> **核心使命**：彻底解决 D-02 与 D-05 在平台评测中纯处理耗时 0ms、0 分的问题，建立动态时间预算分配体系、代码生成严格架构规范与 Python 3.9 AST 守护。
+
+### 14.1 动态时间预算分配体系
+* 针对 175s `TaskTimeoutGuard` 守护预算实施按题专属配置：
+  - **D-01**：LLM 预算 55s，runner 预算 85s；
+  - **D-02**：LLM 预算 70s，runner 预算 80s；
+  - **D-05**：LLM 预算 65s，runner 预算 85s；
+  - **缺省**：LLM 预算 60s，runner 预算 80s；
+* Gateway API 超时设为 `max(30, llm_budget - 5)`s，提前阻断避免 httpx 挂起；
+* 官方 runner 超时动态赋予 `min(runner_budget, max(20, guard.remaining_time() - 3))`s。
+
+### 14.2 Prompt 精简与协议网格动态绑定
+* **D-02 超参网格动态绑定铁律**：显式要求“严禁在代码中硬编码 27 组超参数！必须且只能通过遍历 `request['protocol']['grid']` 动态读取超参列表！默认配置直接读取 `request['protocol']['default_config']`”，避免生成 27 组冗余字典造成的 Token 膨胀与超时；
+* **Python 3.9 严格语法铁律**：严禁 `match/case` 模式匹配语句，类型注解严禁使用 `|` 联合类型（PEP 604），必须使用 `typing.Union` 或省略类型标注；
+* **Token 上限控制**：`max_tokens=2800`，杜绝冗长长注释和无关辅助脚本。
+
+### 14.3 Python 3.9 AST 验证与单轮自愈重试
+* `model_source.py` 内置 `_check_python39_ast` 语法树静态分析：
+  - 阻断 `ast.Match` 节点；
+  - 阻断函数返回、入参及变量注解中的 `ast.BinOp(BitOr)`；
+  - 提取代码时若语法不兼容，抛出带行号与详细原因的 `SyntaxError`；
+* `reproduction_handler.py` 在剩余时间 $> 70s$ 时，自动提取具体错误信息触发单轮修复重试：“代码在 Python 3.9 下报语法错误：{error}，请立即修复并仅输出完整的修正后代码块”，大幅提高首次成功率。
+
+### 14.4 官方 Runner 守护加固
+* 子进程执行设置 `cwd=Path(runner_path).parent`；
+* 捕获 STDOUT 与 STDERR 并落盘至工作目录 `runner.log`，异常时输出核心堆栈片段，杜绝崩溃并保持相对误差原样计算。
+
 

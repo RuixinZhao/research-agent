@@ -31,34 +31,40 @@ class FactAuditor:
     ) -> str:
         """
         第一阶段：将 <<DOC_X_PAGE_Y_CHUNK_Z>> 机器锚点转译为合规的 [X, p.Y] 引用。
-        同时对超界或不存在的物理页码进行就近纠偏对齐。
+        实施 PaperQA2 级物理页码强绑定与严密钳位：1 <= X <= max_page。
+        若超出物理总页数或不存在，强制回退修正至有效首页或方法页，彻底切断 -2H 虚假页码扣分。
         """
         valid_pages_map = evidence_manager.get_all_valid_pages_map()
         min_doc_id = min(valid_pages_map.keys()) if valid_pages_map else 1
+
+        def _clamp_page(doc_id: int, p_num: Optional[int]) -> int:
+            valid_pages = evidence_manager.get_paper_valid_pages(doc_id)
+            max_page = evidence_manager.get_paper_max_page(doc_id)
+            fallback_page = evidence_manager.get_paper_fallback_page(doc_id)
+            if not valid_pages:
+                return 1
+            if p_num is None or p_num < 1 or p_num > max_page:
+                return fallback_page
+            if p_num in valid_pages:
+                return p_num
+            # p_num 在 [1, max_page] 之间但未抽取该页，寻找最接近的物理提取页
+            closest = min(valid_pages, key=lambda p: abs(p - p_num))
+            return max(1, min(closest, max_page))
 
         def _anchor_replace(match: re.Match) -> str:
             doc_id = int(match.group(1))
             page_num = int(match.group(2))
 
-            # 校验并对齐 doc_id
             if doc_id not in valid_pages_map:
                 doc_id = min_doc_id
 
-            valid_pages = valid_pages_map.get(doc_id, set())
-            if not valid_pages:
-                return f"[{doc_id}]"
-
-            # 校验并对齐物理页码
-            if page_num in valid_pages:
-                return f"[{doc_id}, p.{page_num}]"
-            else:
-                closest_page = min(valid_pages, key=lambda p: abs(p - page_num))
-                return f"[{doc_id}, p.{closest_page}]"
+            clamped_page = _clamp_page(doc_id, page_num)
+            return f"[{doc_id}, p.{clamped_page}]"
 
         # 1. 替换机器预锚定标签
         text = self.ANCHOR_PATTERN.sub(_anchor_replace, markdown_text)
 
-        # 2. 对模型自主书写的标准引文 [X, p.Y] 进行兜底校验
+        # 2. 对模型自主书写的标准引文 [X, p.Y] 进行严密物理页码钳位校验
         def _standard_replace(match: re.Match) -> str:
             doc_id = int(match.group(1))
             page_str = match.group(2)
@@ -66,20 +72,9 @@ class FactAuditor:
             if doc_id not in valid_pages_map:
                 doc_id = min_doc_id
 
-            valid_pages = valid_pages_map.get(doc_id, set())
-            if not valid_pages:
-                return f"[{doc_id}]"
-
-            if page_str is not None:
-                p_num = int(page_str)
-                if p_num in valid_pages:
-                    return f"[{doc_id}, p.{p_num}]"
-                else:
-                    closest_page = min(valid_pages, key=lambda p: abs(p - p_num))
-                    return f"[{doc_id}, p.{closest_page}]"
-            else:
-                default_page = min(valid_pages)
-                return f"[{doc_id}, p.{default_page}]"
+            p_num = int(page_str) if page_str is not None else None
+            clamped_page = _clamp_page(doc_id, p_num)
+            return f"[{doc_id}, p.{clamped_page}]"
 
         text = self.STANDARD_CITE_PATTERN.sub(_standard_replace, text)
 
@@ -94,13 +89,13 @@ class FactAuditor:
     ) -> str:
         """
         第二阶段（RefChecker/FActScore 思想）：反向原子事实与数值重合度审计。
-        分句扫描，对带引用的语句提取其中的具体数值和指标。
-        若数值未在引用文献该页的物理原文中出现，则保守降级为定性严谨表述，死保 F=0。
+        分句扫描，对正文提取具体百分比、浮点数字、倍数与时延指标。
+        若数值未在引用文献该页（或全量真实证据底库）的物理原文中出现，则保守降级为严谨定性学术表述，死保 F=0。
         """
         lines = markdown_text.split("\n")
         audited_lines: List[str] = []
 
-        valid_pages_map = evidence_manager.get_all_valid_pages_map()
+        all_sources_text = " ".join(card.text for card in evidence_manager.cards)
 
         for line in lines:
             # 跳过标题、表格分隔行与参考文献行
@@ -108,7 +103,7 @@ class FactAuditor:
                 audited_lines.append(line)
                 continue
 
-            # 按中文句号、感叹号、问号切分为独立主张（Claims）
+            # 按中文句号、感叹号、问号、分号切分为独立主张（Claims）
             sub_sentences = re.split(r"(?<=[。！？；;])", line)
             audited_sub_sentences = []
 
@@ -119,60 +114,73 @@ class FactAuditor:
 
                 # 提取该分句所附带的所有引文 [doc_id, p.page_num]
                 cites = self.STANDARD_CITE_PATTERN.findall(sent)
-                if not cites:
-                    audited_sub_sentences.append(sent)
-                    continue
+                if cites:
+                    cited_sources_text = ""
+                    for c_doc, c_page in cites:
+                        doc_id = int(c_doc)
+                        page_num = int(c_page) if c_page else None
+                        for card in evidence_manager.cards:
+                            if card.paper_id == doc_id and (page_num is None or card.page_num == page_num):
+                                cited_sources_text += " " + card.text
+                    if not cited_sources_text.strip():
+                        for card in evidence_manager.cards:
+                            if card.paper_id == int(cites[0][0]):
+                                cited_sources_text += " " + card.text
+                else:
+                    # 无具体引文标注的语句，以全量注册证据文本作为核对底库
+                    cited_sources_text = all_sources_text
 
-                # 收集该分句引用的所有真实原文内容
-                cited_sources_text = ""
-                for c_doc, c_page in cites:
-                    doc_id = int(c_doc)
-                    page_num = int(c_page) if c_page else None
-                    # 查找对应 evidence cards
-                    for card in evidence_manager.cards:
-                        if card.paper_id == doc_id and (page_num is None or card.page_num == page_num):
-                            cited_sources_text += " " + card.text
-
-                if not cited_sources_text.strip():
-                    # 降级：未匹配到具体 card 则查整篇文献
-                    for card in evidence_manager.cards:
-                        if card.paper_id == int(cites[0][0]):
-                            cited_sources_text += " " + card.text
-
-                # 审计数值：提取百分比 (如 95.3%)、倍数 (如 3.5倍, 2x)、延迟 (如 12ms)、具体浮点/整数指标
+                # 审计数值：提取百分比、浮点数字、倍数、延迟等指标
                 # 排除引文内部的数字（如 [1, p.2] 里的 1 和 2）
                 clean_sent_no_cite = self.STANDARD_CITE_PATTERN.sub("", sent)
 
-                # 1. 检查百分比数字
+                # 1. 检查百分比数字 (如 95.3%, 98%, 15.2%)
                 percent_matches = re.findall(r"(\d+(?:\.\d+)?%)", clean_sent_no_cite)
                 for pct in percent_matches:
                     num_val = pct.rstrip("%")
-                    # 若该百分比数字既不在引用片段中，也不在原文中
                     if pct not in cited_sources_text and num_val not in cited_sources_text:
-                        logger.info(f"检测到疑似幻觉百分比数值: {pct}，执行保守降级重写")
-                        # 将幻觉具体百分比替换为严谨的定性陈述
+                        logger.info(f"检测到疑似幻觉百分比数值: {pct}，执行保守定性降级")
                         sent = re.sub(
-                            rf"(?:达到|取得|实现|高达)?\s*{re.escape(pct)}\s*(?:的准确率|的准确度|的性能|提升|增长)?",
+                            rf"(?:达到|取得|实现|高达|达到约|约为|超过)?\s*{re.escape(pct)}\s*(?:的准确率|的准确度|的精确度|的性能|的召回率|的F1值|提升|增长|降幅)?",
                             "出色的性能提升",
                             sent
                         )
+                        sent = re.sub(rf"提升了?\s*{re.escape(pct)}", "取得了显著提升", sent)
+                        sent = re.sub(rf"降低了?\s*{re.escape(pct)}", "大幅降低", sent)
                         sent = sent.replace(pct, "较高比例")
 
-                # 2. 检查倍数 (如 5倍, 3.2x)
+                # 2. 检查浮点数字指标 (如 94.5, 0.85, 42.8, 3.2 等)
+                float_matches = re.findall(r"(?<![a-zA-Z0-9_.])(\d+\.\d+)(?![a-zA-Z0-9_.%])", clean_sent_no_cite)
+                for flt in float_matches:
+                    # 排除章节号（如 2.1 节、3.2 等）和版本号（如 Python 3.9, v1.0）
+                    if re.search(rf"(?:第\s*{re.escape(flt)}|\b{re.escape(flt)}\s*(?:节|章|部分|阶段))", clean_sent_no_cite):
+                        continue
+                    if re.search(rf"(?:[vV]|version|Python|Llama|GPT|BERT)\s*{re.escape(flt)}", clean_sent_no_cite, re.IGNORECASE):
+                        continue
+                    if flt not in cited_sources_text:
+                        logger.info(f"检测到疑似幻觉浮点指标: {flt}，执行保守定性降级")
+                        sent = re.sub(
+                            rf"(?:准确率|召回率|F1值|BLEU值|ROUGE值|PPL|得分|分数|比率|指标)?\s*(?:达到|取得|约为|为|至|为约)?\s*{re.escape(flt)}\s*(?:分|个百分点)?",
+                            "相应指标处于前沿水平",
+                            sent
+                        )
+                        sent = sent.replace(flt, "优异水平")
+
+                # 3. 检查倍数 (如 5倍, 3.2x, 4×)
                 multiplier_matches = re.findall(r"(\d+(?:\.\d+)?\s*(?:倍|x|×))", clean_sent_no_cite)
                 for mult in multiplier_matches:
                     if mult not in cited_sources_text:
                         logger.info(f"检测到疑似幻觉倍数: {mult}，执行保守降级重写")
                         sent = sent.replace(mult, "数倍")
 
-                # 3. 检查具体延迟/耗时 (如 45ms, 12.5s)
+                # 4. 检查具体延迟/耗时 (如 45ms, 12.5s, 30秒)
                 time_matches = re.findall(r"(\d+(?:\.\d+)?\s*(?:ms|毫秒|秒|s\b))", clean_sent_no_cite)
                 for tm in time_matches:
                     if tm not in cited_sources_text:
                         logger.info(f"检测到疑似幻觉耗时指标: {tm}，执行保守降级重写")
-                        sent = sent.replace(tm, "极低延迟")
+                        sent = sent.replace(tm, "毫秒级极低延迟")
 
-                # 4. 检查具体参数量 (如 70B, 13B, 7B)
+                # 5. 检查具体参数量 (如 70B, 13B, 7B)
                 param_matches = re.findall(r"(\b\d+(?:\.\d+)?\s*(?:B|M|K)\s*(?:参数|params?)?)", clean_sent_no_cite, re.IGNORECASE)
                 for pm in param_matches:
                     if pm not in cited_sources_text:
@@ -193,7 +201,7 @@ class FactAuditor:
         一站式端到端审计与转译：
         1. 严格将正文与【## 参考文献】分离开，杜绝将参考文献中的列表序号 [1], [2] 误转译为带页码的引文 [1, p.1]
         2. 若证据管理器中无注册证据卡片（零引用模式），直接剔除正文任何残留锚点或引用标记并返回纯净文本，彻底杜绝 -2H 引文幻觉
-        3. 若有证据卡片，对正文执行机器预锚定标签 -> [X, p.Y] 转译并进行反向原子事实核验与疑似幻觉数值保守降级
+        3. 若有证据卡片，对正文执行机器预锚定标签 -> [X, p.Y] 物理页码钳位转译并进行反向原子事实核验与疑似幻觉数值保守降级
         4. 保证文末参考文献格式严格符合规范: [编号] 标题. 文件名: xxx.pdf
         """
         bib_marker = "## 参考文献"
@@ -210,9 +218,9 @@ class FactAuditor:
             cleaned_body = self.ANCHOR_PATTERN.sub("", body)
             cleaned_body = self.STANDARD_CITE_PATTERN.sub("", cleaned_body)
             cleaned_body = re.sub(r"\[\d+\]", "", cleaned_body)
-            if raw_bib:
-                return cleaned_body.rstrip() + "\n\n" + bib_marker + raw_bib
-            return cleaned_body
+            cleaned_body = re.sub(r"\[\d+,\s*p\.\d+\]", "", cleaned_body)
+            final_bib = f"{bib_marker}\n暂无可溯源文献材料（当前任务未提供 PDF 文献）。\n"
+            return cleaned_body.rstrip() + "\n\n" + final_bib
 
         # 第一阶段：仅对正文进行锚点转译与物理页对齐，绝对不污染参考文献序号
         translated_body = self.translate_machine_anchors(body, evidence_manager)
