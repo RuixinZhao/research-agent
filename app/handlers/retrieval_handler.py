@@ -9,6 +9,7 @@ from app.handlers.base_handler import BaseHandler
 from app.schemas.task import ChallengeTaskInput
 from app.core.pdf_parser import StreamPDFParser
 from app.core.search_engine import LocalFTS5SearchEngine
+from app.core.circuit_breaker import TaskTimeoutGuard, TaskTimeoutException
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -95,25 +96,46 @@ class RetrievalHandler(BaseHandler):
                 if not os.path.exists(full_path):
                     continue
 
-                # 仅解析前 4 页（覆盖 Title, Abstract, Introduction, 核心方法概述）
-                pages = StreamPDFParser.extract_pages(full_path, max_pages=4)
-                if pages:
-                    engine.index_paper_pages(pdf_name, pages)
-                    first_page_text = pages[0]["text"] if len(pages) > 0 else ""
-                    pdf_snippets_map[pdf_name] = first_page_text[:600]
+                # 仅解析前 2 页（覆盖 Title, Abstract, Introduction, 核心方法概述，大幅提速 2 倍）
+                pages = StreamPDFParser.extract_pages(full_path, max_pages=2)
+                clean_name = pdf_name.replace("_", " ").replace("-", " ").replace(".pdf", " ")
+                pages_with_name = [{"page_num": 0, "text": clean_name}] + (pages or [])
+                engine.index_paper_pages(pdf_name, pages_with_name)
+                first_page_text = pages[0]["text"] if pages and len(pages) > 0 else clean_name
+                pdf_snippets_map[pdf_name] = first_page_text[:600]
                 del pages
                 gc.collect()
 
-            # 3. 构造综合检索词召回候选 Top 论文
+            # 3. 构造综合检索词与双语扩展关键词
             search_query = f"{task.title} {task.input}".strip()
-            candidates = engine.search(search_query, top_k=10)
+            english_keywords = ""
+            if re.search(r"[\u4e00-\u9fa5]", search_query):
+                try:
+                    kw_prompt = (
+                        f"Extract 5 to 8 essential English academic search terms from this Chinese query:\n"
+                        f"{task.input}\n"
+                        f"Return ONLY space-separated English terms, no other text."
+                    )
+                    english_keywords = self.llm.chat_completion(
+                        messages=[{"role": "user", "content": kw_prompt}],
+                        session_id=session_id,
+                        temperature=0.0,
+                        max_tokens=60
+                    ).strip()
+                except Exception as e:
+                    logger.warning(f"RetrievalHandler: Keyword extraction notice: {e}")
+
+            effective_query = f"{search_query} {english_keywords}".strip()
+            candidates = engine.search(effective_query, top_k=15)
             candidate_files = list(dict.fromkeys([c["filename"] for c in candidates]))
 
-            # 若通过 query 未能召回足够候选，且材料库较小（<= 10），将材料库纳入候选
-            if len(candidate_files) < 3 and len(candidate_pool) <= 10:
+            # 若召回候选不足，无论总库规模多大，自动从 candidate_pool 补充候选，确保大模型裁判有充足输入
+            if len(candidate_files) < 8:
                 for fn in candidate_pool:
                     if fn not in candidate_files:
                         candidate_files.append(fn)
+                    if len(candidate_files) >= 15:
+                        break
 
             if not candidate_files:
                 result = {"case_id": task.case_id, "papers": []}
@@ -122,7 +144,7 @@ class RetrievalHandler(BaseHandler):
 
             # 4. 组装候选论文摘要信息
             candidate_info_list = []
-            for fn in candidate_files[:12]:
+            for fn in candidate_files[:15]:
                 snippet = pdf_snippets_map.get(fn, "")
                 candidate_info_list.append({
                     "filename": fn,
@@ -178,15 +200,21 @@ class RetrievalHandler(BaseHandler):
   ]
 }}
 """
-            llm_response = self.llm.chat_completion(
-                messages=[
-                    {"role": "system", "content": "你是一名精通学术论文检索、逻辑严谨、严格执行否定排他防火墙的 AI 专家。输出严格合规 JSON。"},
-                    {"role": "user", "content": firewall_prompt}
-                ],
-                session_id=session_id,
-                temperature=0.0,
-                response_format={"type": "json_object"}
-            )
+            guard = TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=165)
+            llm_response = "{}"
+            try:
+                with guard:
+                    llm_response = self.llm.chat_completion(
+                        messages=[
+                            {"role": "system", "content": "你是一名精通学术论文检索、逻辑严谨、严格执行否定排他防火墙的 AI 专家。输出严格合规 JSON。"},
+                            {"role": "user", "content": firewall_prompt}
+                        ],
+                        session_id=session_id,
+                        temperature=0.0,
+                        response_format={"type": "json_object"}
+                    )
+            except (TaskTimeoutException, Exception) as e:
+                logger.warning(f"RetrievalHandler: LLM firewall exception or timeout for {task.case_id}: {e}")
 
             # 解析 LLM 输出与防火墙二次校验
             selected_papers_raw: List[Dict[str, str]] = []

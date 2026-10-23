@@ -25,7 +25,7 @@ class LLMGatewayClient:
     """
     def __init__(self):
         self.client = httpx.Client(
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=70.0, write=10.0, pool=10.0),
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         )
 
@@ -70,7 +70,7 @@ class LLMGatewayClient:
         if response_format:
             payload["response_format"] = response_format
 
-        max_retries = 3
+        max_retries = 2
         backoff = 1.5
         for attempt in range(max_retries):
             try:
