@@ -1,6 +1,6 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.1 (Bugfix Release - Platform & D Package Alignment)  
+> **版本**：v1.2.2 (Major Bugfix Release - D-02/D-05 Timeout & AST Hardening)  
 > **最后更新**：2026-10-23  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
@@ -92,6 +92,27 @@
   4. **全套自测与提交预检 100% PASS**：
      - `validate_submission.py team` 25 题全集 100% 通过；
      - `pytest tests/` 52 项单元与集成测试全部 PASS。
+* **2026-10-23 21:15**：完成平台评测异常深度反思与根因阻断修复（升级至 v1.2.2）：
+  1. **深度根因排查与反思（D-02 与 D-05 异常「纯处理耗时 0ms」）**：
+     - **表象**：平台截图反映 D-02（耗时 1m22s, 6820 Token）、D-05（耗时 1m26s, 5262 Token）均仅调用模型 1 次，纯处理耗时均为 0ms，报错「Agent 返回结果或保存文件不符合赛题一输出规范」；
+     - **根因确诊**：`reproduction_handler.py` 中硬编码了 `_call_platform_llm(..., timeout=80)`。大模型在未加紧凑约束时为 D-02 生成 6820 Token 耗时 82s、D-05 生成 5262 Token 耗时 86s。在第 80.0s 时 `httpx` 抛出 `ReadTimeout`。该异常被上层捕获后直接触发降级返回了占位失败的答卷并退出（导致 `run_experiment.py` 完全未被唤起，纯处理耗时为 0ms）；评测脚本读取到 `status="failed"` 判定为格式不合规；
+  2. **超时预算动态分配体系**：
+     - 基于 175s `TaskTimeoutGuard` 守护预算实施按题动态分配：
+       - D-01/D-02 runner 执行仅需 ~16s，预留 25s，赋予大模型高达 115s 的超时预算；
+       - D-05 runner 执行需 ~65s，预留 75s，赋予大模型 95s 的充足超时预算；
+       - runner 执行超时动态赋予 `max(20, guard.remaining_time() - 3)`，将剩余全部时间交付官方 runner；
+  3. **Prompt 精简化与 Python 3.9 AST 强约束**：
+     - 将 `max_tokens` 由 4096 收紧至 2800，提示词强化紧凑代码输出，严禁长篇注释与说明；
+     - D-02 明确提示直接从 `request['protocol']['grid']` 读取 27 组超参，避免模型在源码中硬编码 27 个冗余字典导致的 Token 膨胀；
+     - D-05 结构化拆解事件驱动循环与队列淘汰细节；
+     - 严格限定 Python 3.9 语法，严禁 `match/case` 与 `|` 联合类型注解；
+  4. **代码提取与语法自愈重试闭环**：
+     - 若模型首次生成代码无法通过 Python 3.9 AST 语法校验或未闭合，且剩余时间允许（`> runner_reserve + 35s`），自动将语法错误反馈给模型在同一 session 内快速单次重试修复；
+  5. **Runner 追溯日志与相对误差保护**：
+     - `_invoke_official_runner` 增加 `cwd=runner_path.parent`，并自动捕获并落盘 `runner.log`（包含完整 STDOUT 与 STDERR）；
+     - `_parse_submission_and_compute_errors` 严格遵循“未填时计算、已填时原样保留”，杜绝覆盖官方评测结果；
+  6. **全套自测与提交预检 100% PASS**：
+     - `pytest tests/` 53 项单元与集成测试全部 PASS。
 
 ---
 
