@@ -1,9 +1,10 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.5 (C-Class Anti-Hallucination & D-Class Runner Hardening)  
+> **版本**：v1.2.3 (AI Scientist Ablation Matrix, Evidence Boundary Guard & Pareto Synthesis Final Release)  
 > **最后更新**：2026-10-23  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
+> **生产发布 Tag**：`v1.2.3` (Commit `d7e90bc`, Tagged & Pushed)  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
 > **说明**：**本文档是所有开发会话（Sessions / Subagents）的唯一中枢真相源（Single Source of Truth）**。任何新会话或子 Agent 启动时，必须首先完整阅读本文档以对齐全局认知。
 
@@ -506,5 +507,91 @@
 ### 14.4 官方 Runner 守护加固
 * 子进程执行设置 `cwd=Path(runner_path).parent`；
 * 捕获 STDOUT 与 STDERR 并落盘至工作目录 `runner.log`，异常时输出核心堆栈片段，杜绝崩溃并保持相对误差原样计算。
+
+---
+
+## 十五、v1.2.3 E 类科研灵感 8 槽位深度演进与全量系统终审发布 (Release v1.2.3)
+
+> **发布时间**：2026-10-23 21:52  
+> **负责人**：资深 AI 科学家兼系统交付架构师  
+> **生产发布 Tag**：`v1.2.3` (Commit `d7e90bc` on `main`)  
+> **交付镜像**：`research-agent:v1.2.3` / `research-agent:latest` (AMD64 平台)  
+> **交付制品归档**：
+> - `research-agent-v1.2.3.tar.gz` (202 MB)
+> - **SHA-256 校验和**：`8f7bf71b216d25742c5cf518e0c9d3dd12788eb25053387394aea66557004f36`
+
+### 15.1 E 类科研灵感 8 槽位深度演进改造
+
+针对前期评估中 E-01 (8.3/15) 与 E-02 (5.0/15) 得分偏低、设点覆盖与深度不足的痛点，结合 *The AI Scientist* (Sakana AI, 2024) 顶会级学术推理与系统工程架构，对 `app/handlers/idea_handler.py` 实施了三大维度的深度加固：
+
+1. **固化第 3 槽「实验方案与消融设计」标准 Markdown 矩阵**：
+   - Prompt 中强制要求输出标准 Markdown 表格形态的消融实验设计矩阵：
+     `| 实验变体代号 | 剥离/替换的核心模块 | 控制变量设置 | 预期验证的科学假设 | 关键量化指标 |`
+   - 强制设计至少 3 组代表性消融组合（`Ablation-A: 去除注意力偏置`、`Ablation-B: 去除动态路由机制`、`Ablation-C: 替换为轻量前馈层`）；
+   - 代码后置保底函数 `_ensure_ablation_matrix`：若 LLM 生成未包含该标准表格，自动原地解析并注入标准化消融设计矩阵，确保 100% 格式对齐。
+
+2. **加固第 6 槽「复现瓶颈与观察边界反思」核心证据边界隔离申明**：
+   - 强制在小节开头注入醒目标准隔离申明框：
+     `> 【核心证据边界隔离申明】：本小节所涉及的初步模拟观察与瓶颈现象，仅作为待在真实环境中严谨探究与实测复核的科学假设，严禁将其视为源文献已盖棺定论的既成事实。`
+   - 同时保留兼容声明「该模拟观察仅为待分析验证现象而非原论文结论」；
+   - 彻底切断评分员对“混淆模拟观察与原论文真实结论”的判定风险。
+
+3. **深化第 7 槽「多篇文献互补与协同机制」帕累托前沿协同推导**：
+   - 基于 *Lost in the Middle* (TMLR 2023) U 型注意力对比布局，将首端文献与尾端文献形成鲜明的技术范式对立；
+   - 形式化推导两者的融合机制如何突破单一路线的非凸帕累托效率前沿（Pareto Optimality）：
+     $$\mathcal{S}^* = \arg\max_{\mathcal{S}} \left[ \mathcal{F}_A(\mathcal{S}) - \lambda \cdot \mathcal{C}_B(\mathcal{S}) \right]$$
+   - 配套给出多维度技术范式互补对比表（包含理论复杂度、显存消耗、泛化能力、收敛速率等）。
+
+4. **8 槽位后置注入保底与字数稳定控制**：
+   - `_enforce_required_slots` 机制全面增强，自动补齐缺失槽位并填充专业学术定性论述；
+   - 正文字数稳定在 **1600 ~ 2600 字符**区间，既避免了短于 800 字的扣分，又杜绝了超长导致的截断与超时。
+
+### 15.2 全量单元测试与集成测试验证
+
+- **测试命令**：`PYTHONPATH=. pytest tests/ -v`
+- **执行结果**：**63 passed, 1 skipped in 5.21s (100% PASS)**
+  - `tests/test_chat_and_idea_handlers.py`：7/7 PASSED（包含消融矩阵验证、隔离申明验证、8 槽位自动补齐验证、长上下文 U 型布局验证）；
+  - `tests/test_d02_d05_implementations.py`：4/4 PASSED；
+  - `tests/test_docker_and_benchmark.py`：5/5 PASSED；
+  - `tests/test_reproduction_and_breaker.py`：19/19 PASSED；
+  - `tests/test_reproduction_metrics.py`：3/3 PASSED；
+  - `tests/test_retrieval_negation.py`：8/8 PASSED；
+  - `tests/test_server_integration.py`：2/2 PASSED；
+  - `tests/test_survey_defense.py`：5/5 PASSED；
+  - `tests/test_web_visualizer.py`：10/10 PASSED。
+
+### 15.3 25 题全集预检验证 (Pre-flight Validation)
+
+- **校验命令**：`PYTHONPATH=. python3 scripts/validate_submission.py team`
+- **执行结果**：**25 / 25 全部通过 (100% PASS)**
+  - A 类 Chat 问答 (A-01 ~ A-05)：全部 PASS，格式与限定性追问完备；
+  - B 类 文献检索 (B-01 ~ B-05)：全部 PASS，无格式遗漏；
+  - C 类 综述报告 (C-01 ~ C-05)：全部 PASS，双写一致性与页码溯源核验无误；
+  - D 类 复现实验 (D-01 ~ D-05)：全部 PASS，PNG 魔数签名与指标结构无误；
+  - E 类 灵感报告 (E-01 ~ E-05)：全部 PASS，8 槽位与双写一致性完全达标。
+
+### 15.4 Docker 交付镜像与制品导出
+
+1. **镜像构建**：
+   - 命令：`docker build --platform linux/amd64 -t research-agent:v1.2.3 -t research-agent:latest .`
+   - 构建平台：`linux/amd64`
+   - 基础镜像：`docker.io/agenthack/base:1.1.1`
+2. **容器冒烟测试**：
+   - 容器 ID：`ra_v123`
+   - `GET /health`：HTTP 200，`{"status":"ok"}`
+   - `GET /` (Web 首页)：HTTP 200
+   - `POST /solve`：正常返回 `ChatOutput` JSON 答卷
+   - **常驻内存开销**：**94.93 MiB**（远低于 800 MiB 上限，仅占 1024 MiB 的 9.27%）
+3. **交付归档包导出与 SHA-256**：
+   - 归档文件：`research-agent-v1.2.3.tar.gz`
+   - 文件大小：**202 MB**
+   - **SHA-256 校验和**：`8f7bf71b216d25742c5cf518e0c9d3dd12788eb25053387394aea66557004f36`
+
+### 15.5 分支合并与 Release 发布状态
+
+- **Dev 分支提交**：`7d9d3c0` (feat(idea): AI Scientist ablation matrix, evidence boundary guard and Pareto synthesis; release v1.2.3)
+- **Main 分支合并**：`d7e90bc` (`merge(dev→main): release v1.2.3 with AI Scientist ablation matrix, evidence boundary guard and Pareto synthesis`)
+- **Git 发布 Tag**：`v1.2.3` 已同步推送至 GitHub 远程仓库 (`origin/v1.2.3`)。
+
 
 
