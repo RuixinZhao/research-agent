@@ -207,12 +207,17 @@ $$C(e, t) = \\alpha \\cdot \\text{Dist}(e) + \\beta \\cdot \\int_{t_0}^{t_1} \\t
 
     # 2. 验证证据边界硬隔离显式声明
     assert "待分析验证现象而非原论文结论" in result["markdown"]
+    assert "【核心证据边界隔离申明】" in result["markdown"]
     assert "模拟观察" in result["markdown"]
 
-    # 3. 验证字数达标 (>= 800)
-    assert len(result["markdown"]) >= 800
+    # 3. 验证 The AI Scientist 标准消融实验矩阵已固化
+    assert "| 实验变体代号 |" in result["markdown"]
+    assert "| 剥离/替换的核心模块 |" in result["markdown"]
 
-    # 4. 验证双写落盘与一致性
+    # 4. 验证字数达标 (>= 1600)
+    assert len(result["markdown"]) >= 1600
+
+    # 5. 验证双写落盘与一致性
     abs_md_path = os.path.join(clean_test_workspace, expected_md_path)
     assert os.path.exists(abs_md_path)
     with open(abs_md_path, "r", encoding="utf-8") as f:
@@ -263,5 +268,38 @@ def test_idea_handler_missing_slots_auto_recovery(clean_test_workspace):
     assert "基准数据集与数据特征" in result["markdown"]
     assert "多篇文献互补与协同机制" in result["markdown"]
     assert "待分析验证现象而非原论文结论" in result["markdown"]
+    assert "【核心证据边界隔离申明】" in result["markdown"]
+    assert "| 实验变体代号 |" in result["markdown"]
+    assert "帕累托" in result["markdown"]
     assert "参考文献" in result["markdown"]
-    assert len(result["markdown"]) >= 800
+    assert len(result["markdown"]) >= 1600
+
+def test_idea_ablation_matrix_and_pareto_synthesis():
+    """验证 The AI Scientist 消融实验矩阵、核心证据隔离与帕累托前沿推导"""
+    task = ChallengeTaskInput(
+        case_id="E-05",
+        function="Idea",
+        title="多模态长上下文推理",
+        input="基于多模态长文本大模型的注意力瓶颈，设计创新实验方案。初步观察发现：长序列下显存消耗与局部窗口存在严重冲突。",
+        materials=["Paper_A_Theory.pdf", "Paper_B_Engineering.pdf"],
+        constraints=["方案可在消费级GPU运行", "设计消融对照"],
+        expected_output="Idea报告",
+        output_schema_ref="Idea"
+    )
+
+    handler = IdeaHandler()
+    prompt = handler._build_prompt(task)
+
+    # 1. 验证 Prompt 中强制包含消融矩阵表头
+    assert "| 实验变体代号 | 剥离/替换的核心模块 | 控制变量设置 | 预期验证的科学假设 | 关键量化指标 |" in prompt
+    assert "Ablation-A" in prompt
+    assert "Ablation-B" in prompt
+    assert "Ablation-C" in prompt
+
+    # 2. 验证 Prompt 中核心证据边界隔离申明
+    assert "【核心证据边界隔离申明】" in prompt
+    assert "严禁将其视为源文献已盖棺定论的既成事实" in prompt
+
+    # 3. 验证 Prompt 中帕累托前沿推导与U型范式对立
+    assert "帕累托效率前沿突破的形式化推导" in prompt
+    assert "Pareto Optimality" in prompt

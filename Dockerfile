@@ -2,7 +2,7 @@
 FROM agenthack/base:1.1.1
 
 LABEL maintainer="ResearchAgentTeam"
-LABEL version="1.2.0"
+LABEL version="1.2.2"
 
 USER root
 
@@ -13,12 +13,16 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# 复制工程源码
+# 复制工程源码与关键材料
 COPY app /app/app
 COPY server.py /app/server.py
+COPY model_source.py /app/model_source.py
+COPY research-experiments-v1 /app/research-experiments-v1
 
-# 保证非 root 用户 agent 拥有 /app 的完整操作权限
-RUN chown -R agent:agent /app
+# 预创建各级产物目录并授予 agent 用户完全读写执行权限，严防沙箱写入 PermissionError
+RUN mkdir -p /output /app/data /app/data/expert /app/data/figure /app/data/work \
+    && chown -R agent:agent /app /output \
+    && chmod -R 777 /output /app/data
 
 # 切换回官方要求的受限非 root 账号
 USER agent

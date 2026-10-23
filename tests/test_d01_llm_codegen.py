@@ -66,6 +66,9 @@ user_prompt = f"""Please implement `run_experiment(request)` according to the fo
 11. Return strictly valid Python 3.9 code enclosed in ```python ... ``` with no external dependencies.
 """
 
+import pytest
+
+@pytest.mark.skipif(not os.getenv("RUN_LIVE_LLM_TESTS"), reason="Requires RUN_LIVE_LLM_TESTS=1 to run external LLM codegen test")
 def test_code_generation():
     print(f"Connecting to DeepSeek API at {BASE_URL} with model {MODEL}...")
     start_time = time.time()
@@ -91,7 +94,7 @@ def test_code_generation():
     latency = 0.0
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
         latency = time.time() - start_time
         if resp.status_code == 200:
             resp_json = resp.json()

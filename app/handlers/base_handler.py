@@ -10,7 +10,11 @@ class BaseHandler(ABC):
     def __init__(self):
         self.file_writer = SecureFileWriter()
         self.llm = LLMGatewayClient()
-        self.team_name = settings.RESEARCH_WORKSPACE_TEAM
+
+    @property
+    def team_name(self) -> str:
+        return self.file_writer.team_name
+
 
     @abstractmethod
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
