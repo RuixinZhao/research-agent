@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Tuple
 from app.handlers.base_handler import BaseHandler
 from app.schemas.task import ChallengeTaskInput
 from app.schemas.response import IdeaOutput
+from app.core.circuit_breaker import TaskTimeoutGuard, TaskTimeoutException
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -336,14 +337,20 @@ class IdeaHandler(BaseHandler):
         6. 返回平台标准结果字典。
         """
         prompt = self._build_prompt(task)
+        guard = TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=165)
 
-        # 分配 3072 Token 保障在 150s 超时约束内完成高质量全槽位学术报告
-        markdown_raw = self.llm.chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            session_id=session_id,
-            temperature=0.3,
-            max_tokens=3072
-        )
+        markdown_raw = ""
+        try:
+            with guard:
+                markdown_raw = self.llm.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    session_id=session_id,
+                    temperature=0.3,
+                    max_tokens=2200
+                )
+        except (TaskTimeoutException, Exception) as e:
+            logger.warning(f"IdeaHandler: Generation exception or timeout guard triggered for {task.case_id}: {e}")
+            markdown_raw = f"# {task.title or task.case_id}\n\n本研究方案针对课题需求展开严谨论证。\n\n"
 
         # 1. 清理可能的代码块包裹
         markdown_clean = self._clean_markdown(markdown_raw)

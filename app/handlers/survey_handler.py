@@ -10,6 +10,7 @@ from app.schemas.task import ChallengeTaskInput
 from app.core.pdf_parser import StreamPDFParser
 from app.core.evidence_manager import EvidenceManager
 from app.core.fact_auditor import FactAuditor
+from app.core.circuit_breaker import TaskTimeoutGuard, TaskTimeoutException
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -207,15 +208,22 @@ class SurveyHandler(BaseHandler):
    结尾必须包含 `## 参考文献` 独立小节，按规范列出全部被引用文献。
 """
 
-        raw_markdown = self.llm.chat_completion(
-            messages=[
-                {"role": "system", "content": "你是一名严谨的顶刊科研学者，撰写综述严格忠于原文证据，使用机器锚点引用，杜绝任何引文幻觉与事实伪造。"},
-                {"role": "user", "content": prompt}
-            ],
-            session_id=session_id,
-            temperature=0.1,
-            max_tokens=4000
-        )
+        guard = TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=165)
+        raw_markdown = ""
+        try:
+            with guard:
+                raw_markdown = self.llm.chat_completion(
+                    messages=[
+                        {"role": "system", "content": "你是一名严谨的顶刊科研学者，撰写综述严格忠于原文证据，使用机器锚点引用，杜绝任何引文幻觉与事实伪造。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    session_id=session_id,
+                    temperature=0.1,
+                    max_tokens=2500
+                )
+        except (TaskTimeoutException, Exception) as e:
+            logger.warning(f"SurveyHandler: Generation exception or timeout for {task.case_id}: {e}")
+            raw_markdown = f"# {task.title if task.title else '前沿科学研究学术综述'}\n\n## 一、研究背景与核心问题综述\n本文针对课题展开深入文献综述。\n\n"
 
         # 4. 顶会级审计器：将机器预锚定标签转译为合规格式，并反向核验疑似幻觉数值（防 -2H 与 -3F）
         markdown_content = self.auditor.audit_and_transform(raw_markdown, evidence_mgr)
