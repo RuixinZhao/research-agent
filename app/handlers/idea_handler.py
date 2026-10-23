@@ -337,12 +337,12 @@ class IdeaHandler(BaseHandler):
         """
         prompt = self._build_prompt(task)
 
-        # 分配 8192 Token 充分释放 DeepSeek 长文本学术深度
+        # 分配 3072 Token 保障在 150s 超时约束内完成高质量全槽位学术报告
         markdown_raw = self.llm.chat_completion(
             messages=[{"role": "user", "content": prompt}],
             session_id=session_id,
             temperature=0.3,
-            max_tokens=8192
+            max_tokens=3072
         )
 
         # 1. 清理可能的代码块包裹

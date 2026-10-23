@@ -191,10 +191,12 @@ class RetrievalHandler(BaseHandler):
             # 解析 LLM 输出与防火墙二次校验
             selected_papers_raw: List[Dict[str, str]] = []
             evaluations_map: Dict[str, Dict[str, Any]] = {}
+            parsed: Dict[str, Any] = {}
 
             try:
-                parsed = json.loads(llm_response)
-                if isinstance(parsed, dict):
+                raw_json = json.loads(llm_response)
+                if isinstance(raw_json, dict):
+                    parsed = raw_json
                     # 记录细粒度评估
                     raw_evals = parsed.get("evaluations", [])
                     if isinstance(raw_evals, list):
@@ -203,15 +205,17 @@ class RetrievalHandler(BaseHandler):
                                 evaluations_map[ev["filename"].strip()] = ev
 
                     selected_papers_raw = parsed.get("selected", [])
-                elif isinstance(parsed, list):
-                    selected_papers_raw = parsed
+                elif isinstance(raw_json, list):
+                    selected_papers_raw = raw_json
             except Exception as pe:
                 logger.warning(f"LLM 响应 JSON 解析失败，尝试正则提取: {pe}")
                 match = re.search(r"\{.*\}", llm_response, re.DOTALL)
                 if match:
                     try:
                         p_obj = json.loads(match.group(0))
-                        selected_papers_raw = p_obj.get("selected", [])
+                        if isinstance(p_obj, dict):
+                            parsed = p_obj
+                            selected_papers_raw = p_obj.get("selected", [])
                     except Exception:
                         pass
 
