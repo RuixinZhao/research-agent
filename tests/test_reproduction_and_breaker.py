@@ -835,5 +835,62 @@ def test_reproduction_syntax_retry_flow(isolated_repro_env, monkeypatch):
     result = handler.handle(task, session_id="test-retry-syntax")
     assert result["status"] == "completed"
     assert llm_call_count == 2, f"Expected 2 LLM calls (1 initial + 1 retry), got {llm_call_count}"
-    assert "致命错误修复提示" in prompts_seen[1] or "重要修复提示" in prompts_seen[1]
+    assert "代码在 Python 3.9 下报语法错误" in prompts_seen[1]
+
+
+def test_d02_d05_prompt_constraints_and_time_budgets():
+    """
+    验证 D-02 与 D-05 Prompt 约束及动态时间预算：
+    1. D-02 显式要求严禁硬编码 27 组超参，必须遍历 request['protocol']['grid']；
+    2. 全局显式要求 Python 3.9 兼容性，严禁 match/case 与 '|' 联合类型；
+    3. 校验 D-01/D-02/D-05 的专属时间预算配置与 gateway 超时设置。
+    """
+    import ast
+    from app.core.model_source import extract_source
+
+    handler = ReproductionHandler()
+
+    # 1. 时间预算验证
+    assert handler.TIME_BUDGETS["D-01"] == {"llm": 55, "runner": 85}
+    assert handler.TIME_BUDGETS["D-02"] == {"llm": 70, "runner": 80}
+    assert handler.TIME_BUDGETS["D-05"] == {"llm": 65, "runner": 85}
+    assert handler.TIME_BUDGETS["D-02"]["llm"] - 5 == 65
+
+    # 2. D-02 Prompt 约束验证
+    mat_d02 = handler._read_experiment_materials("D-02")
+    if not mat_d02:
+        mat_d02 = {"method": "D02 method", "protocol": "{}", "sample": "{}"}
+    prompt_d02 = handler._build_generation_prompt("D-02", mat_d02)
+    assert "【铁律】：严禁在代码中硬编码 27 组超参数！必须且只能通过遍历 request['protocol']['grid'] 动态读取超参列表！" in prompt_d02
+    assert "【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型）" in prompt_d02
+
+    # 3. D-05 Prompt 约束验证
+    mat_d05 = handler._read_experiment_materials("D-05")
+    if not mat_d05:
+        mat_d05 = {"method": "D05 method", "protocol": "{}", "sample": "{}"}
+    prompt_d05 = handler._build_generation_prompt("D-05", mat_d05)
+    assert "【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型）" in prompt_d05
+
+    # 4. AST 语法拦截验证：match-case
+    resp_match = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request):\n    match request:\n        case 1: pass\n```"}
+        }]
+    }
+    with pytest.raises(SyntaxError) as exc_info:
+        extract_source(resp_match)
+    assert "match-case" in str(exc_info.value) or "Pattern matching" in str(exc_info.value)
+
+    # 5. AST 语法拦截验证：'|' 联合类型注解
+    resp_pipe = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "```python\ndef run_experiment(request: dict) -> dict | None:\n    return {}\n```"}
+        }]
+    }
+    with pytest.raises(SyntaxError) as exc_info:
+        extract_source(resp_pipe)
+    assert "Union type syntax" in str(exc_info.value) or "typing.Union" in str(exc_info.value)
+
 
