@@ -1,7 +1,7 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.0 (Production Release)  
-> **最后更新**：2026-10-21  
+> **版本**：v1.2.1 (Bugfix Release - Platform & D Package Alignment)  
+> **最后更新**：2026-10-23  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
@@ -79,17 +79,19 @@
   2. 升级 `app/handlers/chat_handler.py`：学术追问深度调优，精准聚焦在“自变量物理调控区间/阶梯步长、数据集采样形态与截断粒度、运行环境假设”等硬性科研变量与数据范围限定上；
   3. 通过真实 DeepSeek API 线上生成验证（Chat 277字高保真机理解析与变量追问，Idea 8400+字全槽位深度方案报告，真机通过率 100%），全套 26 项单元与集成测试全部 PASS。
 * **2026-10-16 20:08**：完成 DevOps 容器化实机构建、冒烟测试与内存基线压测验证（见下文第五节详细记录）。
-* **2026-10-16 20:13**：完成 C 类（Survey）无 PDF 零引用防幻觉改造与 B 类（Retrieval）否定排他防火墙对抗性加固：
-  1. **C 类零引用 Fallback 模式（死守 H=0 引文幻觉红线）**：
-     - 当 `task.materials` 为空或本地无匹配 PDF 时，彻底切断任意 PDF 盲选逻辑，进入严格的「零引用模式」；
-     - 使用专门的零引用 System/User Prompt，明确要求基于通用学术知识严谨定性描述，严禁生成任何 `[X, p.Y]`、`(Author, Year)` 或机器锚点，参考文献明确输出“暂无可溯源文献材料（当前任务未提供 PDF 文件）”；
-     - `FactAuditor` 与 `survey_handler.py` 实施后置双重正则强力清洗，彻底杜绝自编引用泄漏；
-     - 经 Live DeepSeek-Chat 真机端到端评测（`scripts/live_test_c.py`）：生成 4351 字高质量综述，幻觉引用检出数为 0，12 个核心二级标题完整覆盖，完美规避 $-2H$ 引文幻觉扣分。
-  2. **B 类对抗性排他检索验证（死守 U=0 误报红线）**：
-     - 强化双层否定排他过滤防火墙，在 `tests/test_retrieval_negation.py` 覆盖 5 大高难度对抗查询（排除神经网络、排除协同过滤、排除 GPT、排除节点分类、肯定对照组）；
-     - 5 项对抗单测 100% PASS，彻底规避 $-0.75U$ 误报罚分。
-  3. **全局测试回归**：
-     - `pytest tests/ -q` 全量 38 项单元与集成测试 100% 全部通过。
+* **2026-10-23 19:00**：完成针对官方评测异常报告与最新版 D 类材料（`research-experiments-20261020-source-v1.zip`）的全面审查与核心缺陷闭环修复（升级至 v1.2.1）：
+  1. **D 类源码准入核验修复 (`d-model-source-v1`)**：
+     - `reproduction_handler.py` 修复了 `_call_platform_llm` 未向赛事 Gateway 发送 `X-Session-ID` 请求头的致命缺陷，对齐官方 session 级存证审计；
+     - 采用 `resolve_llm_endpoint` 避免截断带参数的 URL，并将 prompt 结构完全对齐官方示例；
+     - 当官方 runner 执行成功输出真实指标时，直接原样保留答卷，严禁用占位失败答卷覆盖真实结果；
+  2. **C 类综述规范与无网环境网关适配修复**：
+     - `LLMGatewayClient` 与 `config.py` 增补对平台注入环境变量（`PLATFORM_LLM_URL`, `PLATFORM_API_KEY`, `PLATFORM_LLM_MODEL`, `PLATFORM_SESSION_ID`）的动态优先读取，解决无外网环境下尝试直连公网 DeepSeek API 超时崩溃的问题；
+     - `FactAuditor` 与 `survey_handler.py` 严格隔离正文与 `## 参考文献`，参考文献小节严格保留 `[1] Title. 文件名: xxx.pdf` 格式，杜绝正则转译误篡改为页码；
+  3. **沙箱目录权限与镜像关键材料打包**：
+     - `Dockerfile` 预创建 `/output`, `/app/data/expert`, `/app/data/figure`, `/app/data/work` 并赋予 777 权限，根目录补齐 `model_source.py` 与 `research-experiments-v1`；
+  4. **全套自测与提交预检 100% PASS**：
+     - `validate_submission.py team` 25 题全集 100% 通过；
+     - `pytest tests/` 52 项单元与集成测试全部 PASS。
 
 ---
 

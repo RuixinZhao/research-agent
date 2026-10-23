@@ -220,11 +220,7 @@ class SurveyHandler(BaseHandler):
         # 4. 顶会级审计器：将机器预锚定标签转译为合规格式，并反向核验疑似幻觉数值（防 -2H 与 -3F）
         markdown_content = self.auditor.audit_and_transform(raw_markdown, evidence_mgr)
 
-        # 5. 确保参考文献部分完整存在
-        if "## 参考文献" not in markdown_content:
-            markdown_content += "\n\n## 参考文献\n" + bib_spec_text
-
-        # 6. 字数兜底卫士：确保正文字符数绝对满足 >= 800 字符红线
+        # 5. 字数兜底卫士：确保正文字符数绝对满足 >= 800 字符红线（必须插在 ## 参考文献 之前！）
         if len(markdown_content) < 800:
             first_p_id = min(evidence_mgr.get_all_valid_pages_map().keys()) if evidence_mgr.get_all_valid_pages_map() else 1
             first_valid_page = min(evidence_mgr.get_paper_valid_pages(first_p_id)) if evidence_mgr.get_paper_valid_pages(first_p_id) else 1
@@ -236,7 +232,21 @@ class SurveyHandler(BaseHandler):
                 "未来的工程落地实践中，应着重建立跨多维指标的统一基准评测协议，"
                 "在严格保障计算资源受限环境下的吞吐效率与推理稳定性的同时，进一步提升对复杂科研任务的自动化支撑效能。"
             )
-            markdown_content += supplement_text
+            if "## 参考文献" in markdown_content:
+                parts = markdown_content.split("## 参考文献", 1)
+                markdown_content = parts[0].rstrip() + supplement_text + "\n\n## 参考文献" + parts[1]
+            else:
+                markdown_content += supplement_text
+
+        # 6. 确保参考文献部分完整规范存在于文末（严格保留 [1] Title. 文件名: xxx.pdf 格式）
+        if "## 参考文献" not in markdown_content:
+            markdown_content = markdown_content.rstrip() + "\n\n## 参考文献\n" + bib_spec_text + "\n"
+        else:
+            # 强化核验：避免参考文献中意外残留页码格式
+            parts = markdown_content.split("## 参考文献", 1)
+            cleaned_bib = re.sub(r"\[(\d+),\s*[pP]\.?\s*\d+\]", r"[\1]", parts[1])
+            markdown_content = parts[0].rstrip() + "\n\n## 参考文献" + cleaned_bib
+
 
         # 7. 规范落盘与双写一致性回读核验
         # Markdown 存储规范：data/expert/{case_id}-综述-{team}.md

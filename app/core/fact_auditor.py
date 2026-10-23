@@ -191,19 +191,47 @@ class FactAuditor:
     ) -> str:
         """
         一站式端到端审计与转译：
-        1. 若证据管理器中无注册证据卡片（零引用模式），直接剔除任何残留锚点或引用标记并返回纯净文本，彻底杜绝 -2H 引文幻觉
-        2. 若有证据卡片，转译机器预锚定标签 -> [X, p.Y] 并进行反向原子事实核验与疑似幻觉数值保守降级
+        1. 严格将正文与【## 参考文献】分离开，杜绝将参考文献中的列表序号 [1], [2] 误转译为带页码的引文 [1, p.1]
+        2. 若证据管理器中无注册证据卡片（零引用模式），直接剔除正文任何残留锚点或引用标记并返回纯净文本，彻底杜绝 -2H 引文幻觉
+        3. 若有证据卡片，对正文执行机器预锚定标签 -> [X, p.Y] 转译并进行反向原子事实核验与疑似幻觉数值保守降级
+        4. 保证文末参考文献格式严格符合规范: [编号] 标题. 文件名: xxx.pdf
         """
+        bib_marker = "## 参考文献"
+        if bib_marker in raw_markdown:
+            parts = raw_markdown.split(bib_marker, 1)
+            body = parts[0]
+            raw_bib = parts[1]
+        else:
+            body = raw_markdown
+            raw_bib = ""
+
         if not evidence_manager.cards:
             # 零引用模式：清理任何机器锚点或自编中括号引用，杜绝 -2H 引文幻觉
-            cleaned = self.ANCHOR_PATTERN.sub("", raw_markdown)
-            cleaned = self.STANDARD_CITE_PATTERN.sub("", cleaned)
-            cleaned = re.sub(r"\[\d+\]", "", cleaned)
-            return cleaned
+            cleaned_body = self.ANCHOR_PATTERN.sub("", body)
+            cleaned_body = self.STANDARD_CITE_PATTERN.sub("", cleaned_body)
+            cleaned_body = re.sub(r"\[\d+\]", "", cleaned_body)
+            if raw_bib:
+                return cleaned_body.rstrip() + "\n\n" + bib_marker + raw_bib
+            return cleaned_body
 
-        # 第一阶段：锚点转译与物理页对齐
-        translated = self.translate_machine_anchors(raw_markdown, evidence_manager)
-        # 第二阶段：数值反向核验与降级重写
-        sanitized = self.audit_and_soften_hallucinations(translated, evidence_manager)
-        return sanitized
+        # 第一阶段：仅对正文进行锚点转译与物理页对齐，绝对不污染参考文献序号
+        translated_body = self.translate_machine_anchors(body, evidence_manager)
+        # 第二阶段：仅对正文进行数值反向核验与降级重写
+        sanitized_body = self.audit_and_soften_hallucinations(translated_body, evidence_manager)
+
+        # 整理参考文献章节：必须为标准 [1] 标题. 文件名: xxx.pdf 格式
+        bib_spec_text = evidence_manager.get_bibliography_text()
+        if bib_spec_text:
+            final_bib = f"{bib_marker}\n{bib_spec_text}\n"
+        elif raw_bib.strip():
+            # 清除可能误加在参考文献里的页码
+            cleaned_bib = re.sub(r"\[(\d+),\s*[pP]\.?\s*\d+\]", r"[\1]", raw_bib)
+            final_bib = f"{bib_marker}{cleaned_bib}"
+        else:
+            final_bib = ""
+
+        if final_bib:
+            return sanitized_body.rstrip() + "\n\n" + final_bib
+        return sanitized_body
+
 
