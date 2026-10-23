@@ -45,6 +45,13 @@ class ReproductionHandler(BaseHandler):
         "D-05": [("公平性 Jain 指数", "分数"), ("归一化吞吐", "%"), ("平均等待时间", "ms")],
     }
 
+    TIME_BUDGETS = {
+        "D-01": {"llm": 55, "runner": 85},
+        "D-02": {"llm": 70, "runner": 80},
+        "D-05": {"llm": 65, "runner": 85},
+    }
+    DEFAULT_TIME_BUDGET = {"llm": 60, "runner": 80}
+
     PNG_MAGIC_BYTES = b"\x89PNG\r\n\x1a\n"
 
     def __init__(self):
@@ -119,7 +126,7 @@ class ReproductionHandler(BaseHandler):
         elif case_id == "D-02":
             case_hints = (
                 "【D-02 核心实现要点】:\n"
-                "1. 配置读取：直接从 `request['protocol']['grid']` 读取 27 组配置（若无则按 k1 in [0.4, 1.2, 2.0], b in [0.0, 0.5, 1.0], title_weight in [0.0, 0.5, 2.0] 遍历）；默认配置直接读取 `request['protocol']['default_config']`（默认 {'k1': 1.2, 'b': 0.75, 'title_weight': 0.0}）。不要在代码中硬编码 27 个冗长字典！\n"
+                "1. 【铁律】：严禁在代码中硬编码 27 组超参数！必须且只能通过遍历 request['protocol']['grid'] 动态读取超参列表！默认配置直接读取 request['protocol']['default_config']（如缺省回退 {'k1': 1.2, 'b': 0.75, 'title_weight': 0.0}）。\n"
                 "2. 分词与BM25统计：\n"
                 "   - 正则小写分词：re.findall(r'[a-z0-9]+', text.lower())；\n"
                 "   - 标题与正文分别建立 df 与文档长度统计，N为文档总数（含空字段），avg_length 为字段总长度/N（若为0则按1.0计算）；\n"
@@ -162,7 +169,7 @@ class ReproductionHandler(BaseHandler):
             "必须定义 def run_experiment(request): 函数，不得联网、打印日志或读取隐藏标签。\n"
             "【代码风格与安全硬约束】\n"
             "1. 仅使用 Python 3.9 标准库（如 math, re, json, collections, heapq 等）。严禁导入任何第三方库！\n"
-            "2. 严禁使用 Python 3.10+ 新语法（严禁 match-case 语句，类型注解严禁使用 '|' 联合类型）。代码必须完全兼容 ast.parse(..., feature_version=(3,9))！\n"
+            "2. 【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型），必须使用 typing.Union 或省略类型标注！代码必须完全兼容 ast.parse(..., feature_version=(3,9))！\n"
             "3. 只返回一个完整的 ```python ... ``` 代码块，包含 def run_experiment(request): 及所有必要函数。代码块外严禁任何闲聊或说明文字，严禁提供示例调用或测试代码！\n"
             "4. 代码紧凑高效，不要冗余长篇注释，确保在单一代码块内完整闭合输出。\n\n"
             f"【任务信息】\n{input_desc}\n\n"
@@ -319,7 +326,7 @@ class ReproductionHandler(BaseHandler):
         try:
             proc = subprocess.run(
                 cmd,
-                cwd=str(runner_path.parent),
+                cwd=Path(runner_path).parent,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -327,15 +334,21 @@ class ReproductionHandler(BaseHandler):
             )
             logger.info(f"ReproductionHandler: Runner exited with code {proc.returncode}")
 
-            # 保存完整 runner 执行日志供追溯
+            # 捕获 stdout 与 stderr 到临时日志供追溯
             try:
                 log_path = impl_path.parent / "runner.log"
                 log_path.write_text(f"EXIT: {proc.returncode}\n\nSTDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}", encoding="utf-8")
-            except Exception:
-                pass
+            except Exception as le:
+                logger.debug(f"ReproductionHandler: Failed to write runner log: {le}")
 
             if proc.returncode != 0:
-                logger.error(f"ReproductionHandler: Runner failed (code {proc.returncode}): {proc.stderr}")
+                stderr_summary = proc.stderr.strip()
+                if stderr_summary:
+                    err_lines = stderr_summary.splitlines()
+                    core_err = "\n".join(err_lines[-10:])
+                    logger.error(f"ReproductionHandler: Runner execution failed (code {proc.returncode}) for {case_id}:\n{core_err}")
+                else:
+                    logger.error(f"ReproductionHandler: Runner execution failed with code {proc.returncode} for {case_id}")
                 # 依然尝试检查是否有 submission 文件由 runner 写入磁盘
                 disk_file = Path(self.file_writer.root) / "data" / self.team_name / f"{case_id}.json"
                 if disk_file.is_file():
@@ -605,12 +618,19 @@ class ReproductionHandler(BaseHandler):
                 work_dir.mkdir(parents=True, exist_ok=True)
 
                 # 3. 动态时间预算分配：
-                # D-05 runner 运行约 65-70s，预留 75s；D-01/D-02 预留 25s；另预留 5s 写入与返回
-                case_runner_reserve = {"D-01": 25, "D-02": 25, "D-05": 75}
-                runner_reserve = case_runner_reserve.get(case_id, 30)
-                rem = guard.remaining_time()
-                llm_timeout = int(max(60, min(115, rem - runner_reserve - 5)))
-                logger.info(f"ReproductionHandler: Allocated LLM timeout {llm_timeout}s for {case_id} (runner reserve: {runner_reserve}s)")
+                # D-01: LLM 预算 55s, runner 预算 85s;
+                # D-02: LLM 预算 70s, runner 预算 80s (计算密集型);
+                # D-05: LLM 预算 65s, runner 预算 85s;
+                # 设置 LLM Gateway 调用超时为 llm_budget - 5 秒
+                budget = self.TIME_BUDGETS.get(case_id, self.DEFAULT_TIME_BUDGET)
+                llm_budget = budget["llm"]
+                runner_budget = budget["runner"]
+                gateway_timeout = max(30, llm_budget - 5)
+                logger.info(
+                    f"ReproductionHandler: Allocated budgets for {case_id}: "
+                    f"LLM={llm_budget}s (gateway timeout={gateway_timeout}s), "
+                    f"Runner={runner_budget}s"
+                )
 
                 import inspect
                 def _invoke_llm_safe(prompt_text: str, timeout_sec: int) -> dict:
@@ -620,39 +640,59 @@ class ReproductionHandler(BaseHandler):
                         kwargs["session_id"] = session_id
                     return self._call_platform_llm(prompt_text, **kwargs)
 
-                # Gateway 请求模型生成代码（严格携带 session_id 用于来源审计）
+                # Gateway 请求模型生成代码（超时设置为 llm_budget - 5，防止 httpx 挂起）
                 try:
-                    response_json = _invoke_llm_safe(prompt, timeout_sec=llm_timeout)
+                    response_json = _invoke_llm_safe(prompt, timeout_sec=gateway_timeout)
                 except Exception as e:
                     logger.error(f"ReproductionHandler: LLM code generation failed for {case_id}: {e}")
                     return self._fallback(case_id, status="failed")
 
-                # 4. 提取源码并落盘保存；若提取失败且时间允许，尝试使用错误信息向模型快速请求修复
+                # 4. 提取源码并落盘保存；若遇 SyntaxError 且剩余时间充裕（> 70s），进行一次性自愈修复
                 impl_path = None
                 try:
                     impl_path = self._save_implementation(response_json, work_dir=work_dir)
+                except SyntaxError as se:
+                    error_msg = str(se)
+                    logger.warning(f"ReproductionHandler: SyntaxError during implementation extraction for {case_id}: {error_msg}")
+                    rem = guard.remaining_time()
+                    if rem > 70:
+                        logger.info(f"ReproductionHandler: Self-healing syntax error (rem={rem:.1f}s > 70s): {error_msg}")
+                        healing_prompt = (
+                            f"代码在 Python 3.9 下报语法错误：{error_msg}，请立即修复并仅输出完整的修正后代码块。\n"
+                            "【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型），必须使用 typing.Union 或省略类型标注！确保包含 def run_experiment(request):。"
+                        )
+                        retry_timeout = int(min(rem - runner_budget - 5, gateway_timeout))
+                        try:
+                            response_json = _invoke_llm_safe(healing_prompt, timeout_sec=max(30, retry_timeout))
+                            impl_path = self._save_implementation(response_json, work_dir=work_dir)
+                        except Exception as e2:
+                            logger.error(f"ReproductionHandler: Self-healing retry failed for {case_id}: {e2}")
+                            return self._fallback(case_id, status="failed")
+                    else:
+                        logger.error(f"ReproductionHandler: Insufficient time for self-healing ({rem:.1f}s <= 70s) for {case_id}")
+                        return self._fallback(case_id, status="failed")
                 except Exception as e:
                     logger.warning(f"ReproductionHandler: First source extraction failed for {case_id}: {e}")
                     rem = guard.remaining_time()
-                    if rem > runner_reserve + 35:
-                        logger.info(f"ReproductionHandler: Retrying code generation with error feedback (rem={rem:.1f}s)")
+                    if rem > 70:
+                        logger.info(f"ReproductionHandler: Retrying code generation with error feedback (rem={rem:.1f}s > 70s)")
                         retry_prompt = prompt + (
-                            f"\n\n【重要修复提示】前次生成的代码无法通过 Python 3.9 语法及唯一实现提取校验，具体错误：{str(e)}。\n"
-                            "请严格修正语法（严禁 match-case，严禁 typing 联合 '|'），只输出一个包含完整实现的单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
+                            f"\n\n【重要修复提示】前次生成的代码未通过校验：{str(e)}。\n"
+                            "请严格修正，只输出一个包含完整实现的单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
                         )
-                        retry_timeout = int(min(rem - runner_reserve - 5, 60))
+                        retry_timeout = int(min(rem - runner_budget - 5, gateway_timeout))
                         try:
-                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=retry_timeout)
+                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=max(30, retry_timeout))
                             impl_path = self._save_implementation(response_json, work_dir=work_dir)
                         except Exception as e2:
                             logger.error(f"ReproductionHandler: Retry code extraction also failed for {case_id}: {e2}")
                             return self._fallback(case_id, status="failed")
                     else:
-                        logger.error(f"ReproductionHandler: Insufficient time for retry ({rem:.1f}s remaining)")
+                        logger.error(f"ReproductionHandler: Insufficient time for retry ({rem:.1f}s <= 70s) for {case_id}")
                         return self._fallback(case_id, status="failed")
 
-                # 5. 调用官方 runner 执行（分配所有可用剩余时间）
-                runner_timeout = int(max(20, guard.remaining_time() - 3))
+                # 5. 调用官方 runner 执行（分配 runner_budget 预算，且不超过剩余可用时间）
+                runner_timeout = int(min(runner_budget, max(20, guard.remaining_time() - 3)))
                 logger.info(f"ReproductionHandler: Invoking official runner with timeout {runner_timeout}s for {case_id}")
                 submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=runner_timeout)
                 if submission and isinstance(submission, dict) and "metrics" in submission:
