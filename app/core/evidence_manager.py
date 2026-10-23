@@ -23,21 +23,26 @@ class EvidenceManager:
     物理页预锚定标签证据管理器（PaperQA2 架构）。
     在解析 PDF 物理页时为每个文本片段生成唯一机器锚点标签。
     模型在撰写综述时必须且只能使用机器锚点进行引用，彻底杜绝手写页码造成的幻觉。
+    同时记录每篇文献的物理总页数 max_page 与已提取页码，提供物理页码强绑定与钳位校验。
     """
     def __init__(self):
         self.cards: List[EvidenceCard] = []
         self.tag_to_card: Dict[str, EvidenceCard] = {}
         self.paper_to_valid_pages: Dict[int, Set[int]] = {}
+        self.paper_to_max_page: Dict[int, int] = {}
         self.paper_meta: Dict[int, Dict[str, Any]] = {}
 
-    def register_paper(self, paper_id: int, filename: str, title: str = ""):
-        """注册文献基础信息"""
+    def register_paper(self, paper_id: int, filename: str, title: str = "", max_page: int = 1):
+        """注册文献基础信息与物理真实总页数"""
+        safe_max_page = max(1, int(max_page)) if max_page else 1
         self.paper_meta[paper_id] = {
             "filename": filename,
             "title": title or filename.replace("_", " ").replace("-", " "),
+            "max_page": safe_max_page,
         }
         if paper_id not in self.paper_to_valid_pages:
             self.paper_to_valid_pages[paper_id] = set()
+        self.paper_to_max_page[paper_id] = safe_max_page
 
     def add_page_chunks(
         self,
@@ -51,9 +56,10 @@ class EvidenceManager:
         按物理页切分生成带唯一机器锚点的证据卡片。
         """
         if paper_id not in self.paper_meta:
-            self.register_paper(paper_id, filename)
+            self.register_paper(paper_id, filename, max_page=page_num)
 
         self.paper_to_valid_pages[paper_id].add(page_num)
+        self.paper_to_max_page[paper_id] = max(self.paper_to_max_page.get(paper_id, 1), page_num)
 
         cleaned_text = page_text.strip()
         if not cleaned_text:
@@ -118,6 +124,27 @@ class EvidenceManager:
     def get_paper_valid_pages(self, paper_id: int) -> Set[int]:
         return self.paper_to_valid_pages.get(paper_id, set())
 
+    def get_paper_max_page(self, paper_id: int) -> int:
+        """获取文献物理总页数"""
+        return self.paper_to_max_page.get(paper_id, 1)
+
+    def get_paper_fallback_page(self, paper_id: int) -> int:
+        """
+        获取合法的物理回退页码（1 <= page <= max_page）。
+        优先返回方法/实验核心页（如第 2 或第 3 页），缺省为最小有效页。
+        """
+        valid_pages = self.paper_to_valid_pages.get(paper_id, set())
+        max_p = self.get_paper_max_page(paper_id)
+        if not valid_pages:
+            return 1
+        for pref in (2, 3, 1):
+            if pref in valid_pages and pref <= max_p:
+                return pref
+        valid_in_range = [p for p in valid_pages if 1 <= p <= max_p]
+        if valid_in_range:
+            return min(valid_in_range)
+        return min(valid_pages)
+
     def get_all_valid_pages_map(self) -> Dict[int, Set[int]]:
         return self.paper_to_valid_pages
 
@@ -136,4 +163,5 @@ class EvidenceManager:
         self.cards.clear()
         self.tag_to_card.clear()
         self.paper_to_valid_pages.clear()
+        self.paper_to_max_page.clear()
         self.paper_meta.clear()

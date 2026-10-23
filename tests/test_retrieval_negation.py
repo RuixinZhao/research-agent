@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import pytest
 import fitz
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from app.schemas.task import ChallengeTaskInput
 from app.handlers.retrieval_handler import RetrievalHandler
 from app.config import settings
+
 
 @pytest.fixture
 def mock_retrieval_papers_env(tmp_path, monkeypatch):
@@ -89,7 +91,8 @@ def mock_retrieval_papers_env(tmp_path, monkeypatch):
 
 def _mock_firewall_llm_response(messages, **kwargs):
     """
-    根据 Negation Firewall Prompt 智能模拟审校裁判的评估输出
+    根据两阶段 Negation Firewall Prompt 智能模拟审校裁判的评估输出。
+    返回规范统一的 results 列表格式。
     """
     user_prompt = ""
     for m in messages:
@@ -104,151 +107,96 @@ def _mock_firewall_llm_response(messages, **kwargs):
     # 解析 prompt 中的任务需求与排他意图
     if "节点分类" in task_input:
         return json.dumps({
-            "negative_exclusions": ["节点分类"],
-            "evaluations": [
+            "results": [
                 {
                     "filename": "GNN_Graph_Classification.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
                     "decision": "ACCEPT",
+                    "confidence": 0.95,
                     "reason": "该文献专注整图分类任务，不涉及节点分类，符合要求。"
                 },
                 {
                     "filename": "GNN_Node_Classification.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
                     "decision": "REJECT",
+                    "confidence": 0.0,
                     "reason": "该文献专门研究节点分类，触犯排他红线。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "GNN_Graph_Classification.pdf",
-                    "reason": "图神经网络文献，专注于图级别分类且不涉及节点分类。"
                 }
             ]
         }, ensure_ascii=False)
 
     elif "神经网络" in task_input:
         return json.dumps({
-            "negative_exclusions": ["神经网络"],
-            "evaluations": [
+            "results": [
                 {
                     "filename": "Classical_SVM_Classification.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
                     "decision": "ACCEPT",
+                    "confidence": 0.95,
                     "reason": "该文献研究经典支持向量机方法，未采用任何神经网络，完全符合排他要求。"
                 },
                 {
                     "filename": "Deep_Neural_Network_Vision.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
                     "decision": "REJECT",
+                    "confidence": 0.0,
                     "reason": "该文献核心方法为深度神经网络，直接触碰不包含神经网络的排他红线。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "Classical_SVM_Classification.pdf",
-                    "reason": "研究经典支持向量机分类，未触碰神经网络排他红线。"
                 }
             ]
         }, ensure_ascii=False)
 
     elif "协同过滤" in task_input:
         return json.dumps({
-            "negative_exclusions": ["协同过滤"],
-            "evaluations": [
+            "results": [
                 {
                     "filename": "Content_Based_RecSys.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
                     "decision": "ACCEPT",
+                    "confidence": 0.95,
                     "reason": "该文献聚焦基于内容的推荐系统，未采用协同过滤，符合排他要求。"
                 },
                 {
                     "filename": "Collaborative_Filtering_RecSys.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
                     "decision": "REJECT",
+                    "confidence": 0.0,
                     "reason": "该文献核心方法正是协同过滤，触碰绝对排他红线。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "Content_Based_RecSys.pdf",
-                    "reason": "研究基于内容的推荐系统，排除了协同过滤方法。"
                 }
             ]
         }, ensure_ascii=False)
 
     elif "GPT" in task_input:
         return json.dumps({
-            "negative_exclusions": ["GPT"],
-            "evaluations": [
+            "results": [
                 {
                     "filename": "LLaMA_Open_Foundation_Model.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
                     "decision": "ACCEPT",
+                    "confidence": 0.95,
                     "reason": "该文献为开源大语言模型 LLaMA，非 GPT 系列，完全合规。"
                 },
                 {
                     "filename": "GPT_Generative_Pretrained_Transformer.pdf",
-                    "negative_violation": True,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
                     "decision": "REJECT",
+                    "confidence": 0.0,
                     "reason": "该文献为 GPT 论文，触犯排他约束。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "LLaMA_Open_Foundation_Model.pdf",
-                    "reason": "介绍大语言模型且不包含 GPT 系列文献。"
                 }
             ]
         }, ensure_ascii=False)
 
     elif "Transformer" in task_input or "注意力机制" in task_input:
         return json.dumps({
-            "negative_exclusions": [],
-            "evaluations": [
+            "results": [
                 {
                     "filename": "Transformer_Attention_Model.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": True,
-                    "confidence_score": 5,
                     "decision": "ACCEPT",
+                    "confidence": 0.95,
                     "reason": "该文献提出 Transformer 自注意力模型，完全切合正面主题。"
                 },
                 {
                     "filename": "Random_Forest_Tabular.pdf",
-                    "negative_violation": False,
-                    "core_contribution_match": False,
-                    "confidence_score": 1,
                     "decision": "REJECT",
+                    "confidence": 0.1,
                     "reason": "随机森林文献与 Transformer 注意力机制无关。"
-                }
-            ],
-            "selected": [
-                {
-                    "filename": "Transformer_Attention_Model.pdf",
-                    "reason": "该论文提出 Transformer 架构及其多头注意力机制。"
                 }
             ]
         }, ensure_ascii=False)
 
     # 兜底返回空，恪守宁缺毋滥原则
-    return json.dumps({"negative_exclusions": [], "evaluations": [], "selected": []})
+    return json.dumps({"results": []})
 
 
 def test_negation_firewall_query_1_exclude_neural_network(mock_retrieval_papers_env):
@@ -398,3 +346,96 @@ def test_negation_firewall_query_5_positive_control(mock_retrieval_papers_env):
 
     assert "Transformer_Attention_Model.pdf" in found_papers
     assert "Random_Forest_Tabular.pdf" not in found_papers
+
+
+def test_retrieval_latency_under_35s(mock_retrieval_papers_env):
+    """
+    时延测试：验证单题 handle 端到端耗时严格控制在 35s 以内。
+    """
+    handler = RetrievalHandler()
+    task = ChallengeTaskInput(
+        case_id="B-TIME-01",
+        function="Literature_Retrieval",
+        title="推荐系统与排他检索耗时核验",
+        input="查找研究方向为推荐系统但排除协同过滤方法的文献",
+        materials=[],
+        constraints=["排除任何采用协同过滤的文献"],
+        expected_output="非协同过滤推荐系统文献",
+        output_schema_ref="Literature_Retrieval"
+    )
+
+    start_time = time.time()
+    with patch.object(handler.llm, "chat_completion", side_effect=_mock_firewall_llm_response):
+        result = handler.handle(task, "test_latency_session")
+    elapsed = time.time() - start_time
+
+    print(f"B-TIME-01 Elapsed time: {elapsed:.3f}s")
+    assert elapsed < 35.0, f"单题检索耗时超出 35s 刚性死线: {elapsed:.2f}s"
+    assert len(result["papers"]) > 0
+
+
+def test_retrieval_fallback_stage1_hard_exclusion_zero_leakage(mock_retrieval_papers_env):
+    """
+    容灾与降级测试：当大模型因网络波动或超时彻底不可用时，
+    降级机制触发阶段一规则过滤候选，验证 100% 拦截排除文献，绝无漏报（死守 U=0）。
+    """
+    handler = RetrievalHandler()
+    task = ChallengeTaskInput(
+        case_id="B-FALLBACK-01",
+        function="Literature_Retrieval",
+        title="大模型异常降级测试",
+        input="搜索大语言模型相关论文，但不要包含 GPT",
+        materials=[],
+        constraints=["严禁返回 GPT 系列文献"],
+        expected_output="非 GPT 大模型文献",
+        output_schema_ref="Literature_Retrieval"
+    )
+
+    # 模拟大模型抛出超时/网络异常
+    with patch.object(handler.llm, "chat_completion", side_effect=RuntimeError("LLM Gateway Timeout")):
+        result = handler.handle(task, "test_fallback_session")
+
+    found_papers = [p["filename"] for p in result["papers"]]
+    print(f"Fallback Found papers: {found_papers}")
+
+    # 降级模式下也绝不漏入包含 GPT 的文献
+    for p in found_papers:
+        assert "GPT" not in p, f"降级模式违规漏报 GPT 文献: {p}"
+
+
+def test_retrieval_confidence_filter_discards_uncertain(mock_retrieval_papers_env):
+    """
+    宁缺毋滥（Precision >> Recall）测试：
+    置信度低于 0.85 的候选必须被布尔门禁直接丢弃，不予返回。
+    """
+    handler = RetrievalHandler()
+    task = ChallengeTaskInput(
+        case_id="B-CONF-01",
+        function="Literature_Retrieval",
+        title="低置信度候选拦截测试",
+        input="Transformer 注意力机制相关论文",
+        materials=[],
+        constraints=[],
+        expected_output="Transformer 相关文献",
+        output_schema_ref="Literature_Retrieval"
+    )
+
+    # 模拟大模型对 Transformer 给出 0.70 低置信度（低于 0.85 门槛）
+    mock_low_conf = json.dumps({
+        "results": [
+            {
+                "filename": "Transformer_Attention_Model.pdf",
+                "decision": "ACCEPT",
+                "confidence": 0.70,
+                "reason": "置信度不足"
+            }
+        ]
+    })
+
+    with patch.object(handler.llm, "chat_completion", return_value=mock_low_conf):
+        result = handler.handle(task, "test_conf_session")
+
+    found_papers = [p["filename"] for p in result["papers"]]
+    print(f"Low confidence test found papers: {found_papers}")
+    # 因为 confidence=0.70 < 0.85，不应被接受
+    assert "Transformer_Attention_Model.pdf" not in found_papers
