@@ -1,6 +1,6 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.2 (Major Bugfix Release - D-02/D-05 Timeout & AST Hardening)  
+> **版本**：v1.2.5 (C-Class Anti-Hallucination & D-Class Runner Hardening)  
 > **最后更新**：2026-10-23  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
