@@ -851,10 +851,10 @@ def test_d02_d05_prompt_constraints_and_time_budgets():
     handler = ReproductionHandler()
 
     # 1. 时间预算验证
-    assert handler.TIME_BUDGETS["D-01"] == {"llm": 65, "runner": 60}
-    assert handler.TIME_BUDGETS["D-02"] == {"llm": 105, "runner": 40}
-    assert handler.TIME_BUDGETS["D-05"] == {"llm": 90, "runner": 45}
-    assert handler.TIME_BUDGETS["D-02"]["llm"] - 5 == 100
+    assert handler.TIME_BUDGETS["D-01"] == {"llm": 70, "runner": 60}
+    assert handler.TIME_BUDGETS["D-02"] == {"llm": 110, "runner": 45}
+    assert handler.TIME_BUDGETS["D-05"] == {"llm": 100, "runner": 50}
+    assert handler.TIME_BUDGETS["D-02"]["llm"] - 5 == 105
 
     # 2. D-02 Prompt 约束验证
     mat_d02 = handler._read_experiment_materials("D-02")

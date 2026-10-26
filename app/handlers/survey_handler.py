@@ -278,9 +278,11 @@ class SurveyHandler(BaseHandler):
         citation_matches = list(re.finditer(r'\[\d+(?:,\s*(?:[pP]\.?\s*\d+|\d+))*\]', body))
         if len(citation_matches) > 35:
             keep_indices = set(range(35))
-            def _repl_excess(m, count=[0]):
-                idx = count[0]
-                count[0] += 1
+            c_idx = 0
+            def _repl_excess(m):
+                nonlocal c_idx
+                idx = c_idx
+                c_idx += 1
                 if idx in keep_indices:
                     return m.group(0)
                 return ""

@@ -48,10 +48,10 @@ class ReproductionHandler(BaseHandler):
 
     TIME_BUDGETS = {
         "D-01": {"llm": 70, "runner": 60},
-        "D-02": {"llm": 110, "runner": 60},
-        "D-05": {"llm": 105, "runner": 85},
+        "D-02": {"llm": 110, "runner": 45},
+        "D-05": {"llm": 100, "runner": 50},
     }
-    DEFAULT_TIME_BUDGET = {"llm": 90, "runner": 75}
+    DEFAULT_TIME_BUDGET = {"llm": 95, "runner": 55}
 
     PNG_MAGIC_BYTES = b"\x89PNG\r\n\x1a\n"
 
@@ -98,44 +98,6 @@ class ReproductionHandler(BaseHandler):
 
         return materials
 
-    def _compact_protocol_for_prompt(self, case_id: str, proto_str: str) -> str:
-        """精简 protocol.json 中冗余重复的超参网格，降低 Prompt Token 消耗并加速推理"""
-        if not proto_str:
-            return proto_str
-        try:
-            data = json.loads(proto_str)
-            if isinstance(data, dict) and "grid" in data and isinstance(data["grid"], list) and len(data["grid"]) > 3:
-                total = len(data["grid"])
-                data["grid"] = data["grid"][:2] + [f"... ({total} configs total; iterate request['protocol']['grid'] dynamically)"]
-            return json.dumps(data, ensure_ascii=False, indent=2)
-        except Exception:
-            return proto_str
-
-    def _compact_sample_for_prompt(self, case_id: str, sample_str: str) -> str:
-        """精简 sample.json 中冗长的模拟文档文本，仅保留数据结构骨干，极大降低上下文首字延迟"""
-        if not sample_str:
-            return sample_str
-        try:
-            data = json.loads(sample_str)
-            if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
-                d = data["data"]
-                if "documents" in d and isinstance(d["documents"], list) and len(d["documents"]) > 2:
-                    compact_docs = []
-                    for doc in d["documents"][:2]:
-                        compact_docs.append({
-                            "id": doc.get("id", "doc_0"),
-                            "title": (doc.get("title", "") or "")[:50],
-                            "text": (doc.get("text", "") or "")[:80] + "...",
-                        })
-                    d["documents"] = compact_docs
-                if "dev_queries" in d and isinstance(d["dev_queries"], list) and len(d["dev_queries"]) > 2:
-                    d["dev_queries"] = d["dev_queries"][:2]
-                if "test_queries" in d and isinstance(d["test_queries"], list) and len(d["test_queries"]) > 2:
-                    d["test_queries"] = d["test_queries"][:2]
-            return json.dumps(data, ensure_ascii=False, indent=2)
-        except Exception:
-            return sample_str
-
     def _build_generation_prompt(
         self,
         case_id: str,
@@ -149,10 +111,8 @@ class ReproductionHandler(BaseHandler):
         严格确保 Python 3.9 语法兼容性（严禁 match-case，严禁类型联合 '|'）。
         """
         method = materials.get("method", "")
-        raw_protocol = materials.get("protocol", "")
-        raw_sample = materials.get("sample", "")
-        protocol = self._compact_protocol_for_prompt(case_id, raw_protocol)
-        sample = self._compact_sample_for_prompt(case_id, raw_sample)
+        protocol = materials.get("protocol", "")
+        sample = materials.get("sample", "")
         input_desc = str(task_input or f"请复现 {case_id} 实验，输出指标与图表")
 
         case_hints = ""
@@ -851,8 +811,9 @@ class ReproductionHandler(BaseHandler):
                         logger.error(f"ReproductionHandler: Insufficient conditions for retry (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 15}s) for {case_id}")
                         return self._fallback(case_id, status="failed")
 
-                # 5. 调用官方 runner 执行（分配 runner_budget 预算，且不超过剩余可用时间）
-                runner_timeout = int(min(runner_budget, max(20, guard.remaining_time() - 5)))
+                # 5. 调用官方 runner 执行（D-05 离散仿真约需 65-75s，分配充足运行预算）
+                effective_runner_limit = 85 if case_id == "D-05" else runner_budget
+                runner_timeout = int(min(effective_runner_limit, max(20, guard.remaining_time() - 5)))
                 logger.info(f"ReproductionHandler: Invoking official runner with timeout {runner_timeout}s for {case_id}")
                 submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=runner_timeout)
                 if submission and isinstance(submission, dict) and "metrics" in submission:

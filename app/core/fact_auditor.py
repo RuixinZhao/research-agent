@@ -40,16 +40,15 @@ class FactAuditor:
         def _clamp_page(doc_id: int, p_num: Optional[int]) -> int:
             valid_pages = evidence_manager.get_paper_valid_pages(doc_id)
             max_page = evidence_manager.get_paper_max_page(doc_id)
-            fallback_page = evidence_manager.get_paper_fallback_page(doc_id)
             if not valid_pages:
                 return 1
-            if p_num is None or p_num < 1 or p_num > max_page:
-                return fallback_page
+            if p_num is None or p_num < 1:
+                return min(valid_pages)
             if p_num in valid_pages:
                 return p_num
-            # p_num 在 [1, max_page] 之间但未抽取该页，寻找最接近的物理提取页
+            # p_num 在合法范围内但未提取该页，就近映射到最接近的有效页
             closest = min(valid_pages, key=lambda p: abs(p - p_num))
-            return max(1, min(closest, max_page))
+            return closest
 
         def _anchor_replace(match: re.Match) -> str:
             doc_id = int(match.group(1))
@@ -138,7 +137,7 @@ class FactAuditor:
                 percent_matches = re.findall(r"(\d+(?:\.\d+)?%)", clean_sent_no_cite)
                 for pct in percent_matches:
                     num_val = pct.rstrip("%")
-                    if pct not in cited_sources_text and num_val not in cited_sources_text:
+                    if pct not in cited_sources_text and num_val not in cited_sources_text and pct not in all_sources_text and num_val not in all_sources_text:
                         logger.info(f"检测到疑似幻觉百分比数值: {pct}，执行保守定性降级")
                         sent = re.sub(
                             rf"(?:达到|取得|实现|高达|达到约|约为|超过)?\s*{re.escape(pct)}\s*(?:的准确率|的准确度|的精确度|的性能|的召回率|的F1值|提升|增长|降幅)?",
@@ -149,41 +148,38 @@ class FactAuditor:
                         sent = re.sub(rf"降低了?\s*{re.escape(pct)}", "大幅降低", sent)
                         sent = sent.replace(pct, "较高比例")
 
-                # 2. 检查浮点数字指标 (如 94.5, 0.85, 42.8, 3.2 等)
-                float_matches = re.findall(r"(?<![a-zA-Z0-9_.])(\d+\.\d+)(?![a-zA-Z0-9_.%])", clean_sent_no_cite)
-                for flt in float_matches:
-                    # 排除章节号（如 2.1 节、3.2 等）和版本号（如 Python 3.9, v1.0）
-                    if re.search(rf"(?:第\s*{re.escape(flt)}|\b{re.escape(flt)}\s*(?:节|章|部分|阶段))", clean_sent_no_cite):
-                        continue
-                    if re.search(rf"(?:[vV]|version|Python|Llama|GPT|BERT)\s*{re.escape(flt)}", clean_sent_no_cite, re.IGNORECASE):
-                        continue
-                    if flt not in cited_sources_text:
-                        logger.info(f"检测到疑似幻觉浮点指标: {flt}，执行保守定性降级")
+                # 2. 检查特定综合得分浮点指标 (如 综合评估指标达到 94.2 分，保护正文中的具体实验测量参数与基础数值)
+                score_metric_matches = re.findall(
+                    r"(?:综合评估指标|综合指标|评估指标|模型得分|测试得分|最终得分)\s*(?:达到|高达|约为|为|至)?\s*(\d+\.\d+)\s*(?:分)?",
+                    clean_sent_no_cite
+                )
+                for score_val in score_metric_matches:
+                    if score_val not in cited_sources_text and score_val not in all_sources_text:
+                        logger.info(f"检测到疑似幻觉浮点得分指标: {score_val}，执行保守定性降级")
                         sent = re.sub(
-                            rf"(?:准确率|召回率|F1值|BLEU值|ROUGE值|PPL|得分|分数|比率|指标)?\s*(?:达到|取得|约为|为|至|为约)?\s*{re.escape(flt)}\s*(?:分|个百分点)?",
+                            rf"(?:综合评估指标|综合指标|评估指标|模型得分|测试得分|最终得分)\s*(?:达到|高达|约为|为|至)?\s*{re.escape(score_val)}\s*(?:分)?",
                             "相应指标处于前沿水平",
                             sent
                         )
-                        sent = sent.replace(flt, "优异水平")
 
                 # 3. 检查倍数 (如 5倍, 3.2x, 4×)
                 multiplier_matches = re.findall(r"(\d+(?:\.\d+)?\s*(?:倍|x|×))", clean_sent_no_cite)
                 for mult in multiplier_matches:
-                    if mult not in cited_sources_text:
+                    if mult not in cited_sources_text and mult not in all_sources_text:
                         logger.info(f"检测到疑似幻觉倍数: {mult}，执行保守降级重写")
                         sent = sent.replace(mult, "数倍")
 
                 # 4. 检查具体延迟/耗时 (如 45ms, 12.5s, 30秒)
                 time_matches = re.findall(r"(\d+(?:\.\d+)?\s*(?:ms|毫秒|秒|s\b))", clean_sent_no_cite)
                 for tm in time_matches:
-                    if tm not in cited_sources_text:
+                    if tm not in cited_sources_text and tm not in all_sources_text:
                         logger.info(f"检测到疑似幻觉耗时指标: {tm}，执行保守降级重写")
                         sent = sent.replace(tm, "毫秒级极低延迟")
 
                 # 5. 检查具体参数量 (如 70B, 13B, 7B)
                 param_matches = re.findall(r"(\b\d+(?:\.\d+)?\s*(?:B|M|K)\s*(?:参数|params?)?)", clean_sent_no_cite, re.IGNORECASE)
                 for pm in param_matches:
-                    if pm not in cited_sources_text:
+                    if pm not in cited_sources_text and pm not in all_sources_text:
                         sent = re.sub(rf"\b{re.escape(pm)}\b", "相应规模", sent)
 
                 audited_sub_sentences.append(sent)

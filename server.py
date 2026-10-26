@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Research-Agent", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="Research-Agent", version="1.3.1", lifespan=lifespan)
 
 # 挂载前端可视化与具象化控制台
 app.include_router(web_router)
