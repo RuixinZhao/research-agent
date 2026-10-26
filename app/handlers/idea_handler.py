@@ -379,8 +379,18 @@ class IdeaHandler(BaseHandler):
     _enforce_required_slots = _ensure_slot_coverage
 
     def _ensure_length_compliance(self, markdown_text: str) -> str:
-        """确保正文长度稳定在 1600 ~ 2600 字符区间"""
-        if len(markdown_text) < 1600:
+        """确保正文长度稳定在 1600 ~ 2600 字符区间，且严格不超过平台 4500 字符硬上限 (c1-output-limits-v1)"""
+        bib_marker = "## 参考文献"
+        if bib_marker in markdown_text:
+            parts = markdown_text.split(bib_marker, 1)
+            body = parts[0].rstrip()
+            bib = "## 参考文献" + parts[1]
+        else:
+            body = markdown_text.rstrip()
+            bib = ""
+
+        # 下限保底：>= 1600
+        if len(body) < 1600:
             supplement = (
                 "\n\n### 8.1 生产级沙箱验证与部署实施指南\n"
                 "针对本研究方案的工程化落地与假设检验，建议在严苛的沙箱隔离容器中采用分阶段渐进式验证路径：\n"
@@ -388,8 +398,15 @@ class IdeaHandler(BaseHandler):
                 "2. **阶段二：模拟假说证伪与敏感度分析**：开展针对题目初步模拟观察的专项假设证伪实验，量化极端分布偏移下的敏感度边界；\n"
                 "3. **阶段三：全链路资源监控与吞吐评估**：引入端到端资源监控探针，实时追踪内存驻留峰值与推理吞吐表现，确保在生产级资源约束下实现稳定可靠的高质量产出。\n"
             )
-            markdown_text += supplement
-        return markdown_text
+            body += supplement
+
+        # 上限管控 (c1-output-limits-v1 规范)：正文硬上限 4500 字符，控制在 4100 字符以内
+        if len(body) > 4100:
+            cut_idx = body.rfind("\n\n", 0, 4000)
+            if cut_idx > 1500:
+                body = body[:cut_idx].rstrip()
+
+        return (body + "\n\n" + bib).rstrip() if bib else body
 
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
         """

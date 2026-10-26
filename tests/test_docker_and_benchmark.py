@@ -60,7 +60,7 @@ def test_submission_validator_passing_cases(tmp_path):
             content = {"case_id": cid, "papers": [{"filename": "paper.pdf", "reason": "高保真匹配"}]}
         elif cat == "C":
             md_path = f"data/expert/{cid}-综述-{team_name}.md"
-            md_text = "# 综述\n" + ("正文严谨分析，引用证据材料[1, p.1]。" * 45) + "\n\n## 参考文献\n[1] 文献"
+            md_text = "# 综述\n" + ("正文严谨分析，详述核心机理与实验对比。" * 30) + ("引用证据材料[1, p.1]。" * 15) + "\n\n## 参考文献\n[1] 文献"
             (tmp_path / md_path).write_text(md_text, encoding="utf-8")
             content = {"case_id": cid, "path": md_path, "markdown": md_text}
         elif cat == "D":

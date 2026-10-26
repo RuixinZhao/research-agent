@@ -110,9 +110,13 @@ class SubmissionValidator:
             self.add_error("DISPATCH", "dispatch.json 缺少有效的 'case_ids' 列表")
             return []
 
-        # 检查是否为标准 25 题集合（A-E 各 5 题）
-        if len(case_ids) != 25:
-            self.add_warning("DISPATCH", f"题目数量不是标准 25 题 (当前为 {len(case_ids)} 题)")
+        # 兼容最新正式 11 题标准 (1-3-2-3-2) 与历史 25 题全集 (5-5-5-5-5)
+        if len(case_ids) == 11:
+            self.log(f"命中官方正式 11 题标准 (1-3-2-3-2): {case_ids}")
+        elif len(case_ids) == 25:
+            self.log(f"命中历史兼容 25 题全集 (5-5-5-5-5): {case_ids}")
+        else:
+            self.add_warning("DISPATCH", f"题目数量既非正式 11 题亦非历史 25 题 (当前为 {len(case_ids)} 题)")
 
         category_counts: Dict[str, int] = {}
         for cid in case_ids:
@@ -191,15 +195,25 @@ class SubmissionValidator:
             self.add_error(case_id, "C 类 'markdown' 必须为非空正文字符串")
             return False
 
-        # 校验字符数 >= 800
-        char_count = len(markdown_val)
-        if char_count < 800:
-            self.add_error(case_id, f"C 类综述字数不足 800 字符 (实际: {char_count})")
-            return False
-
         # 校验必备参考文献部分
         if "## 参考文献" not in markdown_val:
             self.add_error(case_id, "C 类综述缺少必备章节 '## 参考文献'")
+            return False
+
+        # 校验字符数：按 ## 参考文献 之前正文计数，范围 800 ~ 5000 字符 (c1-output-limits-v1)
+        body_text = markdown_val.split("## 参考文献", 1)[0].rstrip()
+        char_count = len(body_text)
+        if char_count < 800:
+            self.add_error(case_id, f"C 类综述正文字数不足 800 字符 (实际: {char_count})")
+            return False
+        if char_count > 5000:
+            self.add_error(case_id, f"C 类综述正文字数超出 5000 字符硬上限 (实际: {char_count}, 规则: c1-output-limits-v1)")
+            return False
+
+        # 校验正文文中引用标记总数不得超过 40 次 (c1-output-limits-v1)
+        citation_matches = re.findall(r'\[\d+(?:,\s*(?:[pP]\.?\s*\d+|\d+))*\]', body_text)
+        if len(citation_matches) > 40:
+            self.add_error(case_id, f"C 类综述正文引用标记超出 40 次硬上限 (实际: {len(citation_matches)}, 规则: c1-output-limits-v1)")
             return False
 
         # 校验落盘文件一致性
@@ -316,10 +330,14 @@ class SubmissionValidator:
             self.add_error(case_id, "E 类 'markdown' 必须为非空正文字符串")
             return False
 
-        # 校验字符数 >= 800
-        char_count = len(markdown_val)
+        # 校验字符数：按 ## 参考文献 之前正文计数（若无参考文献则按全文），范围 800 ~ 4500 字符 (c1-output-limits-v1)
+        body_text = markdown_val.split("## 参考文献", 1)[0].rstrip() if "## 参考文献" in markdown_val else markdown_val.rstrip()
+        char_count = len(body_text)
         if char_count < 800:
             self.add_error(case_id, f"E 类 Idea 报告字数不足 800 字符 (实际: {char_count})")
+            return False
+        if char_count > 4500:
+            self.add_error(case_id, f"E 类 Idea 报告正文字数超出 4500 字符硬上限 (实际: {char_count}, 规则: c1-output-limits-v1)")
             return False
 
         # 校验落盘文件一致性

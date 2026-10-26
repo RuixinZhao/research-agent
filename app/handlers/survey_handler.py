@@ -207,14 +207,15 @@ class SurveyHandler(BaseHandler):
 {bib_spec_text}
 
 【刚性红线与评分标准（极其严格）】:
-1. 【字数红线】: 综述正文总字符数必须【严格在 1500 ~ 2500 字符之间】，内容深度展开，严禁简略概括！
-2. 【机器预锚定标签引用铁律（防 -2H 扣分）】:
+1. 【字数红线（c1-output-limits-v1 规范）】: 综述正文（不含参考文献）总字符数必须【严格在 2000 ~ 3800 字符之间】（平台硬上限为 5000 字符，超限直接判无效 0 分，建议 3500 字符左右）！
+2. 【引用标记数量铁律（c1-output-limits-v1 规范）】: 正文中文中引用标记总数【严禁超过 40 次】（建议 15~25 次），同一自然段内对同一文献的重复引用必须合并！
+3. 【机器预锚定标签引用铁律（防 -2H 扣分）】:
    - 正文中涉及研究背景、核心算法、实验结果和结论的所有陈述，必须在句末准确标注引用锚点。
    - 引用锚点【必须且只能】使用材料库中明确提供的机器预锚定标签，格式形如 `<<DOC_1_PAGE_2_CHUNK_0>>`！
    - 【严禁手写页码，严禁手写中括号 [1, p.2]】！系统后处理会自动将机器锚点严密转译为规范格式！
-3. 【事实零幻觉铁律（防 -3F 扣分）】:
+4. 【事实零幻觉铁律（防 -3F 扣分）】:
    - 严禁编造任何具体的量化数值、实验百分比指标（如准确率达到 98.2%）或加速倍数。如证据片段中未列明绝对数字，必须一律采用严谨定性的学术语言描述（如“相较于传统基准展现出显著的收敛稳定性”、“大幅度降低了内存驻留开销”）。
-4. 【综述报告结构规范（必须包含以下 5 大标准章节）】:
+5. 【综述报告结构规范（必须包含以下 5 大标准章节）】:
    # {task.title if task.title else "前沿科学研究学术综述"}
    ## 一、研究背景与核心问题综述
    ## 二、代表性技术路线与方法机制对比分析
@@ -222,7 +223,7 @@ class SurveyHandler(BaseHandler):
    ## 四、现有方案局限性与跨路线互补性探讨
    ## 五、未来发展演进路径与总结
    ## 参考文献
-5. 【参考文献章节规范】:
+6. 【参考文献章节规范】:
    结尾必须包含 `## 参考文献` 独立小节，按规范列出全部被引用文献。
 """
 
@@ -261,8 +262,32 @@ class SurveyHandler(BaseHandler):
         # 4. 顶会级审计器：将机器预锚定标签转译为合规格式，物理页码钳位，并反向核验疑似幻觉数值（防 -2H 与 -3F）
         markdown_content = self.auditor.audit_and_transform(raw_markdown, evidence_mgr)
 
-        # 5. 字数兜底卫士：确保正文字符数绝对满足 >= 800 字符红线（必须插在 ## 参考文献 之前！）
-        if len(markdown_content) < 800:
+        # 5. 顶会级防幻觉审计与 c1-output-limits-v1 规范守卫：
+        # - 正文（## 参考文献 之前）字符数严格控制在 800 ~ 5000 字符区间
+        # - 正文文中引用标记总数严格不得超过 40 次（超出硬上限将判 0 分）
+        bib_marker = "## 参考文献"
+        if bib_marker in markdown_content:
+            parts = markdown_content.split(bib_marker, 1)
+            body = parts[0].rstrip()
+            bib_part = parts[1]
+        else:
+            body = markdown_content.rstrip()
+            bib_part = "\n" + bib_spec_text + "\n"
+
+        # 5.1 引用标记数量管控：正文中引用标记严格不超过 40 次（保持在 35 次以内）
+        citation_matches = list(re.finditer(r'\[\d+(?:,\s*(?:[pP]\.?\s*\d+|\d+))*\]', body))
+        if len(citation_matches) > 35:
+            keep_indices = set(range(35))
+            def _repl_excess(m, count=[0]):
+                idx = count[0]
+                count[0] += 1
+                if idx in keep_indices:
+                    return m.group(0)
+                return ""
+            body = re.sub(r'\[\d+(?:,\s*(?:[pP]\.?\s*\d+|\d+))*\]', _repl_excess, body)
+
+        # 5.2 字数下限守卫：确保正文字符数绝对满足 >= 800 字符红线
+        if len(body) < 800:
             first_p_id = min(evidence_mgr.get_all_valid_pages_map().keys()) if evidence_mgr.get_all_valid_pages_map() else 1
             first_valid_page = evidence_mgr.get_paper_fallback_page(first_p_id)
             supplement_text = (
@@ -274,20 +299,17 @@ class SurveyHandler(BaseHandler):
                 "在严格保障计算资源受限环境下的吞吐效率与推理稳定性的同时，进一步提升对复杂科研任务的自动化支撑效能。"
                 "针对各具特性的计算负载需求，通过动态自适应路由与多层次缓存协同，全面保障生产级高可用系统调度的确定性。"
             )
-            if "## 参考文献" in markdown_content:
-                parts = markdown_content.split("## 参考文献", 1)
-                markdown_content = parts[0].rstrip() + supplement_text + "\n\n## 参考文献" + parts[1]
-            else:
-                markdown_content += supplement_text
+            body += supplement_text
+
+        # 5.3 字数上限守卫 (c1-output-limits-v1 规范)：正文硬上限 5000 字符，控制在 4500 字符以内
+        if len(body) > 4500:
+            cut_idx = body.rfind("\n\n", 0, 4400)
+            if cut_idx > 1000:
+                body = body[:cut_idx].rstrip()
 
         # 6. 确保参考文献部分完整规范存在于文末（严格保留 [1] Title. 文件名: xxx.pdf 格式）
-        if "## 参考文献" not in markdown_content:
-            markdown_content = markdown_content.rstrip() + "\n\n## 参考文献\n" + bib_spec_text + "\n"
-        else:
-            # 强化核验：避免参考文献中意外残留页码格式
-            parts = markdown_content.split("## 参考文献", 1)
-            cleaned_bib = re.sub(r"\[(\d+),\s*[pP]\.?\s*\d+\]", r"[\1]", parts[1])
-            markdown_content = parts[0].rstrip() + "\n\n## 参考文献" + cleaned_bib
+        cleaned_bib = re.sub(r"\[(\d+),\s*[pP]\.?\s*\d+\]", r"[\1]", bib_part)
+        markdown_content = body.rstrip() + "\n\n## 参考文献" + cleaned_bib
 
 
         # 7. 规范落盘与双写一致性回读核验

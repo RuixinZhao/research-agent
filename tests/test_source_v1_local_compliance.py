@@ -129,3 +129,49 @@ def test_dockerfile_and_dockerignore_compliance():
 
     dockerignore_text = (ROOT_DIR / ".dockerignore").read_text(encoding="utf-8")
     assert "!research-experiments-20261020-source-v1-local" in dockerignore_text
+
+
+def test_c1_output_limits_and_validator_rejection(tmp_path):
+    """Verify c1-output-limits-v1 limits: Survey <= 5000 chars, citations <= 40; Idea <= 4500 chars."""
+    from app.handlers.idea_handler import IdeaHandler
+    from scripts.validate_submission import SubmissionValidator
+
+    # 1. IdeaHandler length compliance clamping
+    ih = IdeaHandler()
+    long_idea = "# Title\n\n" + ("这是长篇学术论述段落，用于验证长度边界与防越界截断逻辑。\n\n" * 200) + "## 参考文献\n[1] 论文"
+    clamped_idea = ih._ensure_length_compliance(long_idea)
+    body_idea = clamped_idea.split("## 参考文献")[0].rstrip()
+    assert 1600 <= len(body_idea) <= 4200, f"Clamped Idea length {len(body_idea)} out of bounds"
+
+    # 2. SubmissionValidator limits check
+    v = SubmissionValidator(team_name="test_team", root_dir=str(tmp_path))
+
+    # Test Survey > 5000 chars rejection
+    surv_over_chars = {
+        "case_id": "C-01",
+        "path": "data/expert/C-01-综述-test_team.md",
+        "markdown": "# 综述\n" + ("正文很长" * 1500) + "\n\n## 参考文献\n[1] 文献"
+    }
+    assert v.validate_case_survey("C-01", surv_over_chars) is False
+    assert any("5000" in err for err in v.errors)
+
+    # Test Survey > 40 citations rejection
+    v.errors.clear()
+    surv_over_citations = {
+        "case_id": "C-02",
+        "path": "data/expert/C-02-综述-test_team.md",
+        "markdown": "# 综述\n" + ("正文分析。" * 100) + ("引用文献[1, p.1]。" * 45) + "\n\n## 参考文献\n[1] 文献"
+    }
+    assert v.validate_case_survey("C-02", surv_over_citations) is False
+    assert any("40" in err for err in v.errors)
+
+    # Test Idea > 4500 chars rejection
+    v.errors.clear()
+    idea_over_chars = {
+        "case_id": "E-01",
+        "path": "data/expert/E-01-灵感Idea报告-test_team.md",
+        "markdown": "# Idea\n" + ("长篇研究方案详细论证" * 500)
+    }
+    assert v.validate_case_idea("E-01", idea_over_chars) is False
+    assert any("4500" in err for err in v.errors)
+

@@ -1,8 +1,14 @@
 # 选手 Agent 输入输出格式规范
 
+## 云端运行时限与错误反馈（2026-10-24 更新）
+
+A/B 类每题 `/solve` 最长 540 秒，C/D/E 类每题最长 900 秒，计入本题模型调用、工具、自检及实验等待。D 类平台实验执行最长 840 秒，RPC 最长 870 秒，官方客户端等待最长 880 秒；这些是嵌套上限，不是可叠加的额外预算。Agent 主进程继续使用镜像原启动命令和工作目录，Python 3.9 仅用于平台 D 类实验。
+
+平台保留到任务停止及网关请求排空后的真实抓包、审计和运行追踪。执行时限延长不免除 AgentRuntime 要求；D 类真实零模型调用本身不构成启动失败。裁判失败或证据采集异常显示“待核查/待补评，未出成绩”，不是选手 0 分。反馈会分别标明业务错误、HTTP 状态、协议字段与追踪异常，不公开其他队伍信息、内部路径或原始模型响应。
+
 本文规定五类案例的输入和输出格式。每道题单独执行，题目中的 `case_id` 是本次回答的唯一标识；Agent 必须在输出 JSON 中原样返回该值。输入中的 `output_schema_ref` 指明采用哪一类输出格式，具体格式见下文。
 
-正式每次派题包含五类，每类五套独立测试案例，总计 25 个 case。逐题输入及输出 Schema 保持不变。题目只读文件位于 `assigned/`，结果 JSON 位于队伍目录根部。目录结构如下：
+正式每次派题包含五类，按 1-3-2-3-2 分配独立测试案例，总计 11 个 case。逐题输入及输出 Schema 保持不变。题目只读文件位于 `assigned/`，结果 JSON 位于队伍目录根部。目录结构如下：
 
 ```text
 data/<战队名字>/dispatch.json
@@ -10,29 +16,35 @@ data/<战队名字>/assigned/<case_id>.json   # 输入题目
 data/<战队名字>/<case_id>.json            # Agent 输出
 ```
 
-例如：`data/选手4/C-100.json`。Agent 必须先读取 `dispatch.json`，只处理其中列出的25 个 case_id；不能自行抽题或把 assigned 题目复制成答案。文件名必须与 JSON 内的 `case_id` 完全一致；Survey 和 Idea 的完整 Markdown 文件另存到 `data/expert`，具体命名规则见对应章节。
+例如：`data/选手4/C-100.json`。Agent 必须先读取 `dispatch.json`，只处理其中列出的11 个 case_id；不能自行抽题或把 assigned 题目复制成答案。文件名必须与 JSON 内的 `case_id` 完全一致；Survey 和 Idea 的完整 Markdown 文件另存到 `data/expert`，具体命名规则见对应章节。
 
-平台先生成本队派题记录并提供25 个只读题目文件，Agent 通过文件读取处理 JSON 对象。输出的每一题结果 JSON 保存在 `data/<战队名字>/<case_id>.json`。
+平台先生成本队派题记录并提供11 个只读题目文件，Agent 通过文件读取处理 JSON 对象。输出的每一题结果 JSON 保存在 `data/<战队名字>/<case_id>.json`。
 
 ## 派题记录与文件定位
 
-`dispatch.json` 中 `case_ids` 列出本轮25 个题号，`cases[].question_file` 给出相对工作区根目录的题目路径。各题后缀可能相同，也可能不同；Agent 不需要实现随机派题。
+完整 11 题派题示例、字段说明、路径解析和单题答案示例见 [dispatch.json示例与读取说明.md](dispatch.json示例与读取说明.md)，可单独下载 [dispatch.example.json](示例/dispatch.example.json)。示例仅用于理解格式；正式运行读取平台提供的本队派题记录。若外部平台逐题直接传入 JSON，是否提供派题文件及输入传递方式以该平台接入协议为准，不能仅凭界面中的 Single 判断。
 
-正式派题记录使用 `schema_version: 2`、`cases_per_category: 5`、`rules_version: "research-assistant-objective-v2"`。`case_ids` 必须列出 25 个不同题号，每类五个，`cases` 必须与其一一对应，并包含 `case_id`、`function`、`title`、`question_file`、`question_sha256`。题号允许 A-01 至 A-100 等当前范围，不能只支持两位后缀。以下为定位示意，省略部分不构成可提交的完整派题记录：
+`dispatch.json` 中 `case_ids` 列出本轮11 个题号，`cases[].question_file` 给出相对工作区根目录的题目路径。各题后缀可能相同，也可能不同；Agent 不需要实现随机派题。
+
+正式派题记录使用 `schema_version: 3`、`cases_per_category: {"A": 1, "B": 3, "C": 2, "D": 3, "E": 2}`、`rules_version: "research-assistant-objective-v3"`。`case_ids` 必须列出 11 个不同题号，各类数量为 1/3/2/3/2，`cases` 必须与其一一对应，并包含 `case_id`、`function`、`title`、`question_file`、`question_sha256`。题号允许 A-01 至 A-100 等当前范围，不能只支持两位后缀。A 随机、B–E 固定；D 类 cases 条目还包含 difficulty。以下为定位示意，省略部分不构成可提交的完整派题记录：
 
 ```text
 dispatch_id: d-example-001
 team: 你的队伍名
-schema_version: 2
-cases_per_category: 5
-rules_version: research-assistant-objective-v2
-case_ids: A-01..A-05, B-01..B-05, C-01..C-05, D-01..D-05, E-01..E-05
+schema_version: 3
+selection_mode: random_a_fixed_bcde
+dispatch_policy_version: research-assistant-dispatch-v3
+dispatch_policy_sha256: <服务器配置的 SHA-256>
+difficulty_by_case: {"D-01": "easy", "D-02": "medium", "D-05": "hard"}
+cases_per_category: {"A": 1, "B": 3, "C": 2, "D": 3, "E": 2}
+rules_version: research-assistant-objective-v3
+case_ids: A-01, B-01, B-02, B-03, C-01, C-03, D-01, D-02, D-05, E-01, E-02
 cases: 每个题号一个对象，question_file 为 data/你的队伍名/assigned/<case_id>.json
 ```
 
 旧版 `cases_per_category: 1` 或未提供该字段的五题记录仅供兼容调试，不能生成新版完整自动榜分。Agent 按记录逐题读取，不自行补题，也不重复提交相同题号作为新案例。
 
-Agent 必须核对派题记录中的 `team`、25 个不重复题号（A–E 各五个），以及题目文件内部的 `case_id`；题目只能从本队 `assigned/` 读取。按 `materials` 中完整文件名或相对路径定位论文，再读取正文、检索关键词和核验页码。中文、空格和符号均为文件名的一部分；遇到重名或路径不明确时反馈问题，不猜测替换文件。
+Agent 必须核对派题记录中的 `team`、11 个不重复题号（A–E 分别 1/3/2/3/2 个），以及题目文件内部的 `case_id`；题目只能从本队 `assigned/` 读取。按 `materials` 中完整文件名或相对路径定位论文，再读取正文、检索关键词和核验页码。中文、空格和符号均为文件名的一部分；遇到重名或路径不明确时反馈问题，不猜测替换文件。
 
 ## 文档能力与目录权限验收
 
@@ -42,7 +54,7 @@ Agent 必须核对派题记录中的 `team`、25 个不重复题号（A–E 各�
 | --- | --- |
 | 文档读取 | 正确读取派题 JSON、Markdown、文本和允许的 PDF 正文；不能只读取标题 |
 | 文档定位 | 按 `case_id`、`question_file` 和完整文件名定位题目及材料；按关键词定位正文证据和章节或页码 |
-| 文档写入 | 写出 25 个 UTF-8 结果 JSON、C/E Markdown 和实际 D 图表，按需创建授权子目录 |
+| 文档写入 | 写出 11 个 UTF-8 结果 JSON、C/E Markdown 和实际 D 图表，按需创建授权子目录 |
 | 回读校验 | 检查文件存在且非空、JSON 可解析、题号一致、Markdown 正文一致、图片路径有效 |
 | 目录权限 | 派题记录、题目和材料只读；仅本队结果、工作文件、报告和图片可写；不得访问其他队伍或平台内部目录 |
 | 失败处理 | 材料缺失、权限不足或写入失败时反馈可见原因；D 类用 `materials_missing` 或 `failed`，其余题型保持原有 Schema |
@@ -110,7 +122,7 @@ JSON 和 Markdown 使用 UTF-8；输出 `path` 使用相对工作区根目录的
 | --------------------- | ------------------------- |
 | `case_id`             | 必填。必须与输入完全一致。             |
 | `answer`              | 必填。非空字符串，直接回答当前问题。        |
-| `clarifying_question` | 字符串。题目要求追问时，提出一个最关键的澄清问题。 |
+| `clarifying_question` | 必填。非空字符串，提出一个最关键的澄清问题。 |
 
 **输出示例**
 
@@ -174,6 +186,8 @@ JSON 和 Markdown 使用 UTF-8；输出 `path` 使用相对工作区根目录的
 | `papers`            | 论文结果数组，按相关性从高到低排列；没有相关论文时返回空数组。 |
 | `papers[].filename` | 本地实际存在的完整 PDF 文件名。              |
 | `papers[].reason`   | 说明该论文具体覆盖了哪些检索要求。               |
+
+文件名仅字母大小写不同时，检索评分按同一篇论文匹配并去重；其他字符须与完整文件名一致。读取材料时仍使用论文库中的实际文件名，以兼容区分大小写的服务器文件系统。
 
 **输出示例**
 
@@ -475,38 +489,28 @@ Agent 应提交一个 JSON 文件，并在 `data/expert` 指定的位置另存�
 
 ## 评测反馈与成绩字段
 
-参赛者只写原有五类答案字段，不填写分数、专家分、Token 用量或服务器终止状态。正式本轮提交共 25 个结果 JSON，C/E 各五份 Markdown，D 图表按题目要求生成。
+参赛者只写原有五类答案字段，不填写分数、专家分、Token 用量或服务器终止状态。正式本轮提交共 11 个结果 JSON，C/E 各两份 Markdown，D 图表按题目要求生成。
 
 平台逐题保存 `status`、`score`、`raw_scores`、`scores`、`errors`，类别保存 `average_score`。客观自动榜分为 `automatic_leaderboard_score`（0～100），最终综合成绩为独立 `composite_score`。专家与 Token 复核合计占综合成绩 30%，自动成绩占 70%；复核权重留空或未完成时综合成绩为 null。初赛只使用自动榜分。
 
-非法答案保留 invalid 状态计 0，失败、超时和判题失败也计 0；pending/running 尚未完成时不生成完整榜分。合法 D 类 failed/materials_missing 保持现有三项指标与 figures 字段，不增加错误或评分字段。
+选手非法答案保留 invalid 状态并按本题规则计分，选手失败或超时保留终止状态；平台裁判、实验服务或证据链异常待核查/待补评，成绩为空，不判为选手 0 分。pending/running 尚未完成时不生成完整榜分。合法 D 类 failed/materials_missing 保持现有三项指标与 figures 字段，不增加错误或评分字段。
+
+版本兼容：当前正式轮次为 v3 的 11 题。旧 25 题与旧五题记录只供历史兼容，不属于当前正式题量；Agent 以平台本轮提供的题目及派题记录为准，不自行补题。
 
 
-## 平台运行接入（2026-10-10 发布）
+## D类当前版本：layered-d-v3
 
-- 提交可运行的 Linux amd64 Docker save／OCI 镜像，基于赛事基础镜像 1.1.1，非 root 运行，保留 curl，监听 `0.0.0.0:8080`。
-- 实现 `GET /health` 和 `POST /solve`。平台给 `/solve` 发送本规范定义的八字段任务；返回直接 JSON，并将同一结果保存到本队目录。
-- 一次评测为 A–E 每类五题，共25题。每题运行独立容器和模型会话，单题求解最多180秒；Agent 阶段总上限90分钟，裁判阶段另有35分钟硬上限。这些是保护上限，不代表一般评测需要耗尽。
-- 论文只读挂载在 `/data/papers`，文件名来自当前任务 `materials`。当前派题位于 `/output/data/<team>/dispatch.json` 和 `assigned/`，只读；没有隐藏答案或裁判配置。
-- `RESEARCH_WORKSPACE_TEAM` 是平台提供的稳定工作区名，不要自行以显示队名拼路径。结果保存在 `/output/data/<team>/<case_id>.json`；综述和 Idea 按规范写入 `/output/data/expert`；D 类图片写入 `/output/data/figure/<team>`。
-- 模型地址、模型名、凭据和会话由平台运行时注入 `CHALLENGE_LLM_BASE_URL`、`CHALLENGE_LLM_API_KEY`、`CHALLENGE_LLM_MODEL`、`CHALLENGE_SESSION_ID`。请求须带当前 `X-Session-ID`。不要把密钥写进代码、镜像或结果文件。真实 Token 由模型 Gateway 响应的 usage 计量，Agent 自报不作为判分来源。
+本补充只涉及D-01/D-02/D-05，三题均需本队实现run_experiment(request)，旧完整算法helper/模拟分不适用。D-01简单、D-02中等、D-05困难为设计定位；方法、数据接口、失败部分分与40分细则见[D类实验要求](D类实验要求.md)。下载research-experiments.zip与data/experiments三题材料同版。其他类别规则与原文保持。
 
-### D 类真实实验
 
-本版 D 类使用赛事公开的小型离线数据集和冻结实验脚本，考核可复核实验流程，不宣称复现原论文的大规模结果。三项指标、单位和要求随任务 `input` 下发；公开材料可在本赛题“赛题材料”下载。
+本轮D-01/D-02/D-05实验随机种子统一为42；以layered-d-v3协议和本轮冻结数据为准。
 
-平台将公开材料只读挂载到 `/data/experiments`。收到 D 类任务后，Agent 可主动执行：
 
-```bash
-python /data/experiments/run_experiment.py --case D-01
-```
+## Survey / Idea 正文上限（c1-output-limits-v1）
 
-将 `D-01` 换为当前 `case_id`。短期认证由平台注入，helper 会请求本题独享的 Unix 通信通道，启动无公网、无额外权限的冻结实验容器。它会执行真实环境检查、数据读取、实验计算及图表生成，将真实输出复制到本队结果目录，并打印严格的 D 类 JSON。Agent 应检查结果、返回该 JSON，不得编造 observed 或图片。同题重复请求复用已完成结果，不再次运行；失败不自动重跑。
+新版派题的 Markdown 正文按 `## 参考文献` 章节之前的内容计数，空格、标点及 Markdown 符号均计入；参考文献章节不计入正文上限：
 
-平台保留实验容器的实际命令、退出码、strace 数据读写及文件哈希，供官方判题器核验。采集范围仅为 Agent 主动请求的冻结实验，不能代表 Agent 所有进程的完整系统调用。选手自行提交的日志、Runtime Evidence 或分数不视为可信证明。未执行真实实验、材料缺失或非法输出按官方终态规则记本题0分，不缩小该类五题分母；平台采集、归档或身份校验失败则整次评测不计成绩。
+- `C-*` Survey：最多 5000 字符，建议约 3500 字符；正文文中引用标记最多 40 次。复合数字标注如 `[1,2]` 按一组标记计一次，同一自然段内重复引用应合并。
+- `E-*` Idea：最多 4500 字符，建议 1800～3200 字符；禁止程序动态拼接、硬编码扩写或使用无关的通用段落。
 
-网络抓包按题目容器短生命周期运行，只采模型代理端口；pcap、明文审计、实验私有 trace 和隐藏答案仅管理员可访问。选手页面展示状态、用量和评分，不提供这些私有文件下载。
-
-### 自动评分与综合成绩
-
-七项自动评分为 Chat 5、文献检索15、综述事实一致性15、引用可信度10、Idea 槽位覆盖15、实验流程20、数据与图表20，共100分。各类五题固定分母取均值；Token 不加入这个自动分。综合成绩按已公布的性能70%、专家与 Token 单独复核30%处理，后者内部合成细则仍待公告，不将未定稿综合分显示成已确认成绩。
+超过上限会由平台判为提交结果无效。此项只增加输出限制，不改变 `case_id`、`path`、`markdown` 字段或另存文件规则，也不追溯重算旧评测。
