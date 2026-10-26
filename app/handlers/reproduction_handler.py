@@ -66,6 +66,8 @@ class ReproductionHandler(BaseHandler):
         candidates = [
             Path("/data/experiments") / case_id,
             Path(settings.EXPERIMENTS_DIR) / case_id,
+            project_root / "research-experiments-20261020-source-v1-local" / case_id,
+            Path(os.getcwd()) / "research-experiments-20261020-source-v1-local" / case_id,
             project_root / "research-experiments-v1" / case_id,
             Path(os.getcwd()) / "research-experiments-v1" / case_id,
         ]
@@ -296,6 +298,8 @@ class ReproductionHandler(BaseHandler):
         candidates = [
             Path("/data/experiments/run_experiment.py"),
             Path(settings.EXPERIMENTS_DIR) / "run_experiment.py",
+            project_root / "research-experiments-20261020-source-v1-local" / "run_experiment.py",
+            Path(os.getcwd()) / "research-experiments-20261020-source-v1-local" / "run_experiment.py",
             project_root / "research-experiments-v1" / "run_experiment.py",
             Path(os.getcwd()) / "research-experiments-v1" / "run_experiment.py",
         ]
@@ -316,6 +320,7 @@ class ReproductionHandler(BaseHandler):
         env = os.environ.copy()
         env["RESEARCH_EXPERIMENT_CASE"] = case_id
         env["RESEARCH_WORKSPACE_TEAM"] = self.team_name
+        env["TEAM_ID"] = self.team_name
         env["RESEARCH_RESULT_ROOT"] = self.file_writer.root
         env["RESEARCH_LAYERED_D"] = "layered-d-v3"
         env["RESEARCH_D_SOURCE_PROVENANCE"] = "d-model-source-v1"

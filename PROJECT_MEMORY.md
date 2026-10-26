@@ -694,6 +694,70 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
   - 容器落盘验证：`/output/data/eval_team_test/A-04.json` 与 `/app/data/team/A-04.json` 均成功生成且内容一致；
   - 容器内存：**122.0 MiB**（仅占 1024 MiB 硬限的 11.9%）。
 
+---
+
+## 18. [Sprint 2026-10-26] research-experiments-20261020-source-v1-local 官方规范约束严格对齐与 v1.2.6 交付
+
+### 18.1 官方修订规范全量审计与核心要求
+
+依据比赛官方针对 D 类实验下发的最新修订说明包 `research-experiments-20261020-source-v1-local/`，团队对全部 5 份规范文档、2 份参考脚本及 3 道实验赛题（D-01、D-02、D-05）进行了逐项对照审计：
+
+1. **准入协议 `d-model-source-v1` 铁律**：
+   - 严禁镜像内预置完整算法直接提交；必须由外层 Agent 在当前题 `/solve` 会话内，通过赛事 Gateway（`PLATFORM_LLM_URL`、`PLATFORM_API_KEY`、`PLATFORM_LLM_MODEL`，携带 `X-Session-ID`）请求模型生成完整实现；
+   - 提取保存必须原样保留，`finish_reason` 必须严格等于 `'stop'`（截断 `length` 必须要求模型重新生成完整版，严禁本地拼接）；
+   - 必须通过 `app.core.model_source.save_source` 进行 Python 3.9 AST 语法树深度前检与 `run_experiment(request)` 入口验证；
+   - 必须保存原始响应正文至 `generation-response.json`，并将源码写入 `implementation.py`。
+2. **官方 Runner 调度与环境变量规范**：
+   - 调用命令严格遵循：`python /data/experiments/run_experiment.py --case <case_id> --implementation <impl_path>`；
+   - 必须显式注入环境变量：
+     - `RESEARCH_EXPERIMENT_CASE = <case_id>`
+     - `RESEARCH_WORKSPACE_TEAM = <team_name>` 及 `TEAM_ID = <team_name>`
+     - `RESEARCH_RESULT_ROOT = /output`
+     - `RESEARCH_LAYERED_D = "layered-d-v3"`
+     - `RESEARCH_D_SOURCE_PROVENANCE = "d-model-source-v1"`
+   - 由平台挂载的 runner 执行 Unix socket RPC (`/source` 验源 $\rightarrow$ `/run` 隔离执行)，自动落盘答卷与真实 PNG 图表。
+3. **分值结构与严禁捏造假数据（`layered-d-v3`）**：
+   - 每题 40 分（流水线 20 分 + 数据与图表 20 分）；
+   - 答卷必须包含恰好 3 个指标对象，包含 `name, unit, reference, observed, relative_error`；
+   - 实验未完成或失败时，保留 3 个指标对象且数值置为 `null`，真实图片保留，无图片时 `figures=[]`，严禁伪造假数据或将对象置空。
+
+### 18.2 架构适配与工程落地
+
+1. **材料与 Runner 寻找链路更新 (`app/handlers/reproduction_handler.py`)**：
+   - 在 `_read_experiment_materials` 候选路径中加入 `research-experiments-20261020-source-v1-local/{case_id}`（排在平台挂载目录之后、旧版 `research-experiments-v1` 之前）；
+   - 在 `_find_official_runner` 候选路径中加入 `research-experiments-20261020-source-v1-local/run_experiment.py`；
+   - 在 `_invoke_official_runner` 中同步注入 `TEAM_ID` 环境变量。
+2. **容器镜像与打包构建 (`Dockerfile`, `.dockerignore`)**：
+   - 在 `Dockerfile` 中添加 `COPY research-experiments-20261020-source-v1-local /app/research-experiments-20261020-source-v1-local`；
+   - 移除第一行 `# syntax=docker/dockerfile:1` 避免在离线/内网环境下拉取外部构建器镜像超时；
+   - 在 `.dockerignore` 显式添加 `!research-experiments-20261020-source-v1-local`，确保构建上下文完整收录；
+   - 镜像版本标识升级至 `v1.2.6`。
+3. **版本控制与规范文件入库 (`.gitignore`)**：
+   - 从 `.gitignore` 移除 `research-experiments-*-local/`，使官方基准测试材料与规范文件纳入版本受控。
+4. **规范遵从性专属测试集 (`tests/test_source_v1_local_compliance.py`)**：
+   - `test_package_manifest_integrity`：验证 `PACKAGE_MANIFEST.json` 记录的全部 54 个文件 SHA-256 摘要 100% 匹配；
+   - `test_reproduction_handler_material_lookup`：验证三题材料正常解析且包含 3 项指标；
+   - `test_reproduction_handler_find_official_runner`：验证准确命中官方 runner；
+   - `test_root_model_source_and_core_model_source_compatibility`：验证根目录与核心目录的 `model_source` 提取行为一致；
+   - `test_d_model_source_rejection_rules`：验证对截断、缺函数、多版本冲突代码的严格拒绝；
+   - `test_dockerfile_and_dockerignore_compliance`：验证 Docker 打包指令与白名单配置无误。
+
+### 18.3 交付验收与发布成果
+
+- **单元测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **74 passed, 1 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **Docker AMD64 镜像构建与冒烟测试 (smoke_v126)**：
+  - `docker run -d --name smoke_v126 -p 8089:8080 ... research-agent:v1.2.6`
+  - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`；
+  - `POST /solve` (A-04 检索增强)：正常返回合规 ChatOutput（字数 150~300 字，以问号结尾）；
+  - 容器落盘验证：`/output/data/eval_team_test/A-04.json`、`/app/data/eval_team_test/A-04.json`、`/app/data/team/A-04.json` 交叉冗余生成且内容一致；
+- **最新发布包哈希清单 (v1.2.6)**：
+  - 镜像名称：`research-agent:v1.2.6` / `research-agent:latest`
+  - 导出归档：
+    - `research-agent-v1.2.6.tar` (203 MB, SHA-256: `256fef1ba16ea105f4af37b1590b93387d627424b263fe94c1815f8a65eac800`)
+    - `research-agent-v1.2.6.tar.gz` (202 MB, SHA-256: `8e1025ba575ab4f95004bc55767f784688f715daf3ff207f1c766dc05c96552c`)
+
+
 
 
 
