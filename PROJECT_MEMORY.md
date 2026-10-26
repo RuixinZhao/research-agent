@@ -779,17 +779,65 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
 | **单题云端执行时限** | 旧默认超时 180 秒 | **云端运行时限（2026-10-24 明确）**：<br>- A/B 类单题 `/solve` 最长 540 秒；<br>- C/D/E 类单题最长 900 秒；<br>- D 类平台执行 840s、RPC 870s、客户端 880s（包含在单题总预算内）。 | 调度器与熔断守护器依据题目类别赋予充裕预算，避免误触发短超时熔断。 |
 | **D 类实验准入** | 旧版四函数脚手架 / 镜像内置完整算法 / helper 模拟分 | **`layered-d-v3` + `d-model-source-v1` 铁律**：<br>必须通过赛事 Gateway 由模型生成完整代码，落盘 `generation-response.json` 与 `implementation.py`，经 Python 3.9 AST 校验后由平台 runner 验源并隔离执行。 | 彻底清理旧版 D-01 4-function helper 概念，全面固化 AST 前检自愈与官方 runner 统一接口。 |
 
-### 19.3 交付全量校验状态
+---
 
-- **75 项 Pytest 自动化测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **74 passed, 1 skipped (100% PASS)**；
-- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**（含新版 5000/4500 字上限及 40 次引用上限校验）；
-- **Docker 镜像及交付包更新**：
-  - 镜像名称：`research-agent:v1.2.6` / `research-agent:latest`
-  - 导出归档：
-    - `research-agent-v1.2.6.tar` (203 MB, SHA-256: `fd373a2cb218e506289211c0dc8333cb7b717279136b06f605cb7304074e7f25`)
-    - `research-agent-v1.2.6.tar.gz` (202M, SHA-256: `c53fa30493c999e66176e30027eb2834c6a871381a583fee50dd39ef2943f4a0`)
+## 20. [Sprint 2026-10-26] AGENT_RUNTIME_LLM_TRACE_MISSING 深度根因排查与链路审计闭环 (Release v1.2.7)
 
+> **发布时间**：2026-10-26 18:00  
+> **负责人**：Agent 核心架构与平台评测合规专家  
+> **生产发布 Tag**：`v1.2.7`  
+> **交付镜像**：`research-agent:v1.2.7` / `research-agent:latest` (Linux/AMD64)  
+> **交付制品归档**：
+> - `research-agent-v1.2.7.tar` (203 MB, SHA-256: `13a0508b5b52dec52ee0a372643145756420b98acf2d7c84be0d46647361aee1`)
+> - `research-agent-v1.2.7.tar.gz` (202 MB, SHA-256: `235eb966140e2939968e6c94a260c586f868bb648e02c180198c1deb1cf30f87`)
 
+### 20.1 线上报错根本原因剖析 (Root-Cause Analysis)
 
+线上评测报告报错：
+`AGENT_RUNTIME_LLM_TRACE_MISSING：模型调用已有网关记录，但缺少本次 AgentRuntime 模型调用追踪，请检查真实调用是否处于运行时上下文；本次不出成绩`
 
+经深度逆向审计底层 `agenthack/base:1.1.1`（包含 `agenthack.telemetry`、`agenthack.interceptor`、`agenthack.network` 与 `agenthack.runtime`）及调用链路，准确定位根本原因：
+1. **D 类复现代码生成链路脱离 AgentRuntime 模型追踪上下文**：
+   在 `app/handlers/reproduction_handler.py` 的 `_call_platform_llm` 中，原实现直接使用原生 `httpx.Client.post` 发送请求。`httpx` 被 `agenthack.network` 拦截后仅生成网络传输层的 HTTP Span（并在请求头中注入了 `x-agenthack-session-id`），**但因未激活 `agenthack_llm` 上下文变量，从未生成 `agent.llm` 业务 Span**。
+   评测平台网关接收到了请求并记录了该调用，但在对比 OTLP 上报的链路追踪时，发现该会话的 `llm_call_count == 0` 且缺少 `agent.llm` Span，从而触发 `AGENT_RUNTIME_LLM_TRACE_MISSING` 门禁熔断，判“本次不出成绩”！
+2. **LLMGatewayClient 降级保底链路存在追踪断层风险**：
+   在 `app/core/llm_gateway.py` 中，当 OpenAI SDK 调用因网关特性（如不支持 `response_format` 或网络抖动）降级至原生 `httpx` 时，同样仅有 HTTP 传输层埋点而缺失 `agent.llm` 业务 Span。
+3. **OpenAI SDK `base_url` 规整健壮性防御**：
+   若平台注入的 `PLATFORM_LLM_URL` 携带 query 参数，原有的字符串 endswith 切割可能导致 SDK 追加错误的路径，导致降级至未受保护的 `httpx`。
+
+### 20.2 架构修复与多层防护闭环
+
+1. **`LLMGatewayClient` 全链路显式激活 `llm_call` 运行时上下文 (`app/core/llm_gateway.py`)**：
+   - 使用 `urlsplit` / `urlunsplit` 规整 `clean_openai_base_url`，确保 query 参数不破坏基础路径；
+   - 在发起大模型请求前，显式挂载官方 `agenthack.telemetry.llm_call(model=model, provider="openai-compatible", endpoint=endpoint)` 上下文管理器；
+   - 无论走 OpenAI SDK 还是原生 `httpx` 降级链路，均在 `tel_op` 作用域内执行，并统一通过 `tel_op.set(...)` 记录 `input_tokens`、`output_tokens`、`total_tokens` 及 `finish_reason`，确保 OTLP Collector 必然收到结构完整的 `agent.llm` Span。
+2. **`ReproductionHandler` 升级为双链路受控大模型调用 (`app/handlers/reproduction_handler.py`)**：
+   - 引入 `clean_openai_base_url` 与 `llm_call` 运行时上下文；
+   - 优先通过 `openai.OpenAI` SDK 发起代码生成，传递 `X-Session-ID`，平滑回退至 `httpx`；
+   - 无论何种链路，均受到 `llm_call` 上下文守护，保证一次生成与可能的 `finish_reason=length` 截断重试均严格生成对应的 `agent.llm` Trace，彻底杜绝 D 类漏报。
+3. **服务端 `server.py` 全链路上下文与响应头双向对齐 (`server.py`)**：
+   - 实现 `get_telemetry()` 惰性自适应初始化，规避进程启动瞬态环境变量未注入的竞态风险；
+   - 兼容 `case_id` 与 `task_id` 别名解析；
+   - 提取请求头 `traceparent`、`X-Session-ID` 与 `user_id_hash`，激活 `_telemetry.session(...)` 与 `agent.task` 上下文；
+   - 在 HTTP 响应头中注入 `X-Trace-ID`、`X-Session-ID`、`X-LLM-Calls`，为平台端审计核验提供直观证据支撑；
+   - 在请求生命周期的 `finally` 阶段可靠执行 `tel.flush()`，确保任务 Trace 毫秒级落盘并传输至评测收集器。
+
+### 20.3 交付全量校验状态
+
+- **容器内深度链路追踪实测**：
+  在 `agenthack/base:1.1.1` 镜像内运行专属验证套件（`scripts/test_runtime_telemetry.py`），覆盖真实 OpenAI SDK 调用、httpx 降级链路及复现代码生成截断重试：
+  - OpenAI SDK 模式：`llm_call_count == 1`，Token 计量精准捕获；
+  - httpx 降级模式：`llm_call_count == 1`，Token 计量精准捕获；
+  - ReproductionHandler 模式：`llm_call_count >= 1`，Token 计量精准捕获；
+  - 全部模式 100% PASS！
+- **单元测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **77 passed, 3 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **Docker 容器 AMD64 冒烟实测 (ra_test_v127)**：
+  - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`；
+  - `POST /solve` (带 W3C traceparent 模拟测试)：
+    - 响应头包含：`x-trace-id: 4bf92f3577b34da6a3ce929d0e0e4736`、`x-session-id: smoke-sess-127`、`x-llm-calls: 1`；
+    - 状态码 200 OK，响应内容符合官方规范。
+- **发布制品**：
+  - `research-agent-v1.2.7.tar` (203 MB, SHA-256: `13a0508b5b52dec52ee0a372643145756420b98acf2d7c84be0d46647361aee1`)
+  - `research-agent-v1.2.7.tar.gz` (202 MB, SHA-256: `235eb966140e2939968e6c94a260c586f868bb648e02c180198c1deb1cf30f87`)
 
