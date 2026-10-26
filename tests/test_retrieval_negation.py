@@ -406,7 +406,8 @@ def test_retrieval_fallback_stage1_hard_exclusion_zero_leakage(mock_retrieval_pa
 def test_retrieval_confidence_filter_discards_uncertain(mock_retrieval_papers_env):
     """
     宁缺毋滥（Precision >> Recall）测试：
-    置信度低于 0.85 的候选必须被布尔门禁直接丢弃，不予返回。
+    置信度低于 0.70（新阈值）的候选必须被布尔门禁直接丢弃，不予返回。
+    阈值已从 0.85 降低到 0.70，以减少误判丢弃。
     """
     handler = RetrievalHandler()
     task = ChallengeTaskInput(
@@ -420,13 +421,13 @@ def test_retrieval_confidence_filter_discards_uncertain(mock_retrieval_papers_en
         output_schema_ref="Literature_Retrieval"
     )
 
-    # 模拟大模型对 Transformer 给出 0.70 低置信度（低于 0.85 门槛）
+    # 模拟大模型对 Transformer 给出 0.60 低置信度（低于 0.70 新门槛）
     mock_low_conf = json.dumps({
         "results": [
             {
                 "filename": "Transformer_Attention_Model.pdf",
                 "decision": "ACCEPT",
-                "confidence": 0.70,
+                "confidence": 0.60,
                 "reason": "置信度不足"
             }
         ]
@@ -437,5 +438,5 @@ def test_retrieval_confidence_filter_discards_uncertain(mock_retrieval_papers_en
 
     found_papers = [p["filename"] for p in result["papers"]]
     print(f"Low confidence test found papers: {found_papers}")
-    # 因为 confidence=0.70 < 0.85，不应被接受
+    # 因为 confidence=0.60 < 0.70（新阈值），不应被接受
     assert "Transformer_Attention_Model.pdf" not in found_papers

@@ -227,7 +227,7 @@ async def get_system_info():
 
     return {
         "status": "online",
-        "version": "1.2.8",
+        "version": "1.2.9",
         "team": settings.RESEARCH_WORKSPACE_TEAM,
         "runtime": {
             "python_version": sys.version.split()[0],

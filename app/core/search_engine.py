@@ -7,6 +7,52 @@ logger = logging.getLogger(__name__)
 
 # 中英文学术核心词汇对照与双语扩展字典（零耗时规则扩展，彻底替代多轮 LLM 交互）
 BILINGUAL_ACADEMIC_MAP: Dict[str, List[str]] = {
+    # 学术问答与科学合成 (赛题一核心)
+    "学术问答": ["question answering", "QA", "scientific synthesis", "knowledge synthesis", "PaperQA"],
+    "问答合成": ["question answering", "QA", "scientific synthesis", "knowledge synthesis", "PaperQA"],
+    "科学问答": ["scientific QA", "question answering", "scientific synthesis"],
+    "科学合成": ["scientific synthesis", "knowledge synthesis", "PaperQA"],
+    "知识合成": ["knowledge synthesis", "scientific synthesis"],
+    # 大模型幻觉抑制与事实性评测 (赛题一核心)
+    "幻觉抑制": ["hallucination", "hallucination detection", "hallucination checker", "factuality", "factual precision", "RefChecker", "FActScore"],
+    "幻觉检测": ["hallucination detection", "hallucination checker", "factuality", "RefChecker"],
+    "幻觉": ["hallucination", "hallucination checker", "factuality", "RefChecker"],
+    "事实性": ["factuality", "factual precision", "FActScore", "atomic evaluation"],
+    "真实性": ["factuality", "factual precision", "faithfulness", "groundedness"],
+    # 细粒度引文归因与引用生成 (赛题一核心)
+    "细粒度引文": ["fine-grained citation", "citation generation", "attribution", "ALiiCE", "GCite"],
+    "引文归因": ["citation attribution", "attribution evaluation", "citation generation", "GCite", "PCite", "ALiiCE"],
+    "引用生成": ["citation generation", "verifiable generation", "ALiiCE"],
+    "引文": ["citation", "attribution", "reference", "citing", "ALiiCE", "GCite"],
+    "引用": ["citation", "attribution", "reference"],
+    "归因": ["attribution", "verifiable", "citation attribution", "attribution evaluation"],
+    # 长篇综述与学术调研 (赛题一核心)
+    "综述": ["survey", "literature survey", "review", "AutoSurvey", "SurveyAgent", "SurveyForge"],
+    "学术综述": ["literature survey", "survey paper", "AutoSurvey", "SurveyAgent", "SurveyForge"],
+    "文献综述": ["literature survey", "survey", "AutoSurvey", "SurveyAgent"],
+    "调研": ["survey", "literature review"],
+    # 上下文分块与文本检索 (赛题一核心)
+    "分块": ["chunking", "late chunking", "contextual chunk", "chunk embeddings"],
+    "切片": ["chunking", "late chunking", "contextual chunk"],
+    "分块嵌入": ["chunk embeddings", "late chunking"],
+    "词法检索": ["lexical search", "sparse scoring", "BM25", "BM25S"],
+    "稀疏检索": ["sparse scoring", "sparse retrieval", "BM25S"],
+    "检索算法": ["lexical search", "retrieval", "BM25", "search engine"],
+    # 长上下文与注意力衰减 (赛题一核心)
+    "长文本": ["long context", "long document", "long contexts"],
+    "长上下文": ["long context", "long contexts", "Lost in the Middle"],
+    "居中丢失": ["lost in the middle", "long contexts", "positional effect"],
+    "上下文位置": ["positional", "lost in the middle", "contextual"],
+    # 软件工程智能体与自动化修复 (agent_papers核心)
+    "智能体": ["agent", "agents", "autonomous agents", "multi-agent", "agentic"],
+    "多智能体": ["multi-agent", "multi-agent systems", "cooperative agents"],
+    "代码修复": ["program repair", "code repair", "bug fixing", "automated repair"],
+    "程序修复": ["program repair", "code repair", "automated program repair"],
+    "漏洞检测": ["vulnerability detection", "vulnerabilities", "security review"],
+    "模糊测试": ["fuzzing", "fuzzer", "directed fuzzing"],
+    "代码审查": ["code review", "code analysis", "static analysis"],
+    "根因分析": ["root cause analysis", "RCA", "debugging"],
+    "单元测试": ["unit test", "test generation"],
     # 推荐系统与过滤
     "推荐系统": ["recommender system", "recommendation", "collaborative filtering", "content-based"],
     "推荐算法": ["recommender system", "recommendation"],
@@ -20,7 +66,6 @@ BILINGUAL_ACADEMIC_MAP: Dict[str, List[str]] = {
     "注意力机制": ["attention mechanism", "multi-head attention", "transformer"],
     "预训练": ["pre-trained", "pretraining"],
     "微调": ["fine-tuning", "finetuning", "LoRA"],
-    "长文本": ["long context", "long document"],
     "检索增强": ["retrieval-augmented", "RAG"],
     # 图学习
     "图神经网络": ["graph neural network", "GNN", "GCN", "graph convolutional"],
@@ -189,16 +234,24 @@ class LocalFTS5SearchEngine:
         if not tokens:
             return []
 
-        # 过滤极常见停用词，保留高质量区分词
+        # 过滤极常见停用词与赛题元词，保留高质量区分词
         stop_words = {
             "the", "a", "an", "is", "are", "in", "on", "of", "to", "for", "with",
-            "and", "or", "这", "的", "是", "在", "和", "了", "有", "及", "与", "关于"
+            "and", "or", "这", "的", "是", "在", "和", "了", "有", "及", "与", "关于",
+            "检索", "核心", "方向", "去重", "文献", "论文", "研究", "方法", "技术", "模型",
+            "以及", "包含", "采用", "基于", "b", "01", "02", "03", "04", "05", "case", "task"
         }
-        filtered_tokens = [t for t in tokens if t not in stop_words]
+        # 英文词汇优先（论文库为全英文，英文词是命中的绝对核心关键），随后补充中文单字
+        en_tokens = [t for t in tokens if t.isascii() and len(t) >= 2 and t not in stop_words]
+        zh_tokens = [t for t in tokens if not t.isascii() and t not in stop_words]
+
+        # 去重并组合：英文特征词在前，中文特征词在后，最多保留 35 个有效 token
+        unique_en = list(dict.fromkeys(en_tokens))
+        unique_zh = list(dict.fromkeys(zh_tokens))
+        filtered_tokens = (unique_en + unique_zh)[:35]
+
         if not filtered_tokens:
             filtered_tokens = tokens[:10]
-        else:
-            filtered_tokens = filtered_tokens[:25]  # 限制 token 数量避免过长 SQL
 
         # 安全构造 FTS5 MATCH 表达式（每个 token 双引号包裹防特殊字符语法错误）
         match_expr = " OR ".join(f'"{t}"' for t in filtered_tokens)

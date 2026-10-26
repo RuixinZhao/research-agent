@@ -1,7 +1,7 @@
 FROM agenthack/base:1.1.1
 
 LABEL maintainer="ResearchAgentTeam"
-LABEL version="1.2.8"
+LABEL version="1.2.9"
 
 USER root
 

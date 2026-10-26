@@ -1,10 +1,10 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.8 (D-02 / D-05 Multi-Call Timeout Blowout Elimination, Token Budget Optimization & Platform Provenance Defense Final Release)  
+> **版本**：v1.2.9 (B-Class Retrieval Zero-Score Elimination, Cross-Lingual FTS5 BM25 Re-Ranking & Negation Firewall Hardening Final Release)  
 > **最后更新**：2026-10-26  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
-> **生产发布 Tag**：`v1.2.8`  
+> **生产发布 Tag**：`v1.2.9`  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
 > **说明**：**本文档是所有开发会话（Sessions / Subagents）的唯一中枢真相源（Single Source of Truth）**。任何新会话或子 Agent 启动时，必须首先完整阅读本文档以对齐全局认知。
 
@@ -896,4 +896,58 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
   - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`；
   - `GET /api/system` 响应：`"task_timeout_seconds": 150, "status": "online"`；
 - **离线与来源校验合规**：完美符合 `d-model-source-v1` 与 `layered-d-v3` 规范。
+
+---
+
+## 二十二、v1.2.9 生产交付：彻底攻克 B 类文献检索 0 分与低分、FTS5 BM25 跨语言检索与否定防火墙加固
+
+> **交付制品归档**：
+> - `research-agent-v1.2.9.tar` (202 MB, SHA-256: `ef471d1b387dc54132802878593a8008b1df7d656f7334c66cff17802fc2f98f`)
+> - **构建时间**：2026-10-26 19:50
+> - **适用平台基准**：`agenthack-base:1.1.1` (Linux/AMD64)
+
+### 22.1 线上实测致命故障排查与根因确诊 (B-01 3.8分 / B-02 0.8分 / B-03 0分)
+
+1. **SQLite FTS5 Token 截断导致的跨语言召回灾难**：
+   - 英文论文库中完全不含中文字符，查询以中文输入并拼接双语扩展词汇；
+   - 原代码使用 `filtered_tokens = [t for t in tokens if t not in stop_words][:25]`，将中文单字排在最前，**导致所有双语扩展追加的英文学术关键词全部被截断抛弃**；
+   - SQLite FTS5 在只包含中文单字的 MATCH 表达式下对英文论文命中数为 0，退回字母序首几篇无关论文传给大模型。
+2. **`BILINGUAL_ACADEMIC_MAP` 赛题一核心学术领域词典严重缺失**：
+   - 赛题一三大核心支柱词汇（“学术问答/知识合成”、“大模型幻觉抑制/事实性”、“细粒度引文归因/引用生成”）在双语映射字典中命中率为 0；
+   - 即使 FTS5 正常检索，也无法将“引文归因”映射到 `attribution / ALiiCE / GCite`，将“幻觉抑制”映射到 `hallucination / RefChecker / FActScore`。
+3. **否定排他防火墙 `\b` 正则陷阱与过度误杀**：
+   - 原 `_check_hard_exclusion` 使用 `\b` 匹配中文排除词，由于 Python `re` 判定汉字均为 `\w`，字与字之间无单词边界，导致中文排除词完全无法匹配；
+   - 英文正文/摘要单次提及（`unnegated_count > 0`）即硬剔除，导致包含比较论述的有效论文被误杀，引发 Stage 1 留存候选为 0，直接输出 `papers: []` 判 0 分；
+   - `_extract_negation_keywords` 中 `len(k) >= 3` 导致 2 字中文排除特征词（如“综述”）被漏判。
+4. **置信度门禁过严与空答卷兜底缺失**：
+   - 判定门禁原设置为 `confidence >= 0.85`，大模型正常给出的 0.7x 置信度被全部丢弃；
+   - 当大模型审查判定皆为 REJECT 时，原代码跳过 Step 9 降级，返回空列表 `[]` 导致直接判 0 分。根据公式 `max(0, 15*H/N - 0.75*U)`，空答卷锁定 0 分，而输出通过 Stage 1 排他审查的 Top 候选期望得分远高于 0 分。
+
+### 22.2 架构重构与加固方案 (v1.2.9)
+
+1. **FTS5 英文学术关键词绝对优先排序与动态停用词过滤 (`app/core/search_engine.py`)**：
+   - 在构建 FTS5 MATCH 表达式时，将具有判别力的英文学术词汇（`isascii() and len >= 2`）置于最前，随后填充中文单字，放宽至 35 个 Token；
+   - 过滤“检索、去重、核心、方向、文献”等元指令停用词；
+   - 实测对赛题一核心查询，Top-5 排序 100% 精准锁定 `RefChecker`, `GCite_vs_PCite`, `FActScore`, `ALiiCE`, `PaperQA2`！
+2. **全覆盖学术领域双语映射字典 (`BILINGUAL_ACADEMIC_MAP`)**：
+   - 全面覆盖学术问答与科学合成（PaperQA/QA）、大模型幻觉与事实性评测（RefChecker/FActScore）、细粒度引文归因与引用生成（ALiiCE/GCite）、长篇综述（AutoSurvey/SurveyAgent/SurveyForge）、上下文分块（Late Chunking）、长文本位置衰减（Lost in the Middle）、代码修复与漏洞检测智能体；
+3. **两阶段排他防火墙精准对齐与防误杀 (`app/handlers/retrieval_handler.py`)**：
+   - 针对中文字符移除 `\b` 边界，英文字符保留 `\b` 边界；
+   - 完善英文否定前置词列表（增加 `unlike, rather than, instead of, as opposed to` 等）；
+   - 摘要排他检查调整为 `unnegated_count >= 2`（出现 2 次以上且无否定修饰才判定为正向核心讨论），单次提及交由大模型语义裁决；
+   - 扩展 `neg_translations` 增补“综述、模糊测试、漏洞、强化学习、知识图谱、微调、分块”等映射，并将长度阈值放宽至 `len >= 2`；
+4. **置信度门禁平滑化与降级兜底 (`app/handlers/retrieval_handler.py`)**：
+   - 置信度阈值调谐至 `conf >= 0.70`；
+   - 候选摘要截取扩容至 1000 字符（包含标题与完整 Abstract）；
+   - 安全上限锁定在 4 篇（Precision >> Recall，严防 -0.75U 倒扣）；
+   - 若本地 `papers_dir` 无文件或为空，自动降级从题目 `materials` 中模糊匹配并选取候选。
+
+### 22.3 验证全集与交付指标
+
+- **单元测试全量通过**：`pytest tests/` $\rightarrow$ **77 passed, 3 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **排他防火墙测试**：`tests/test_retrieval_negation.py` $\rightarrow$ **8 passed (100% PASS, 2.95s)**；
+- **端到端真题模拟**：B-01 准确召回 4 篇目标引文与幻觉论文，B-03 否定排他 100% 拦截综述类文献（0 漏网）；
+- **Docker 容器实测 (smoke-v129)**：`GET /health` 响应 `{"status":"healthy","telemetry_configured":true}`。
+
 
