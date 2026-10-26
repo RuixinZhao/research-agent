@@ -754,8 +754,40 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
 - **最新发布包哈希清单 (v1.2.6)**：
   - 镜像名称：`research-agent:v1.2.6` / `research-agent:latest`
   - 导出归档：
-    - `research-agent-v1.2.6.tar` (203 MB, SHA-256: `256fef1ba16ea105f4af37b1590b93387d627424b263fe94c1815f8a65eac800`)
-    - `research-agent-v1.2.6.tar.gz` (202 MB, SHA-256: `8e1025ba575ab4f95004bc55767f784688f715daf3ff207f1c766dc05c96552c`)
+    - `research-agent-v1.2.6.tar` (203 MB, SHA-256: `fd373a2cb218e506289211c0dc8333cb7b717279136b06f605cb7304074e7f25`)
+    - `research-agent-v1.2.6.tar.gz` (202 MB, SHA-256: `c53fa30493c999e66176e30027eb2834c6a871381a583fee50dd39ef2943f4a0`)
+
+---
+
+## 19. [Sprint 2026-10-26] 赛题一平台实时规范全面同步与旧要求清理
+
+### 19.1 平台在线接口直接同步结果 (http://aiagent-anic.com/challenges/challenge-tbd)
+
+通过直接拉取官方大赛平台 API 终结点：
+1. `/api/v1/challenges/challenge-tbd/materials/research-agent-spec` $\rightarrow$ [`research-agent-spec.md`](./research-agent-spec.md) (19,525 字符，100% 逐字同步)
+2. `/api/v1/challenges/challenge-tbd/materials/research-description` $\rightarrow$ [`research-description.md`](./research-description.md) (15,837 字符，100% 逐字同步)
+3. `/api/v1/challenges/challenge-tbd/materials/research-scoring-rules` $\rightarrow$ [`research-scoring-rules.md`](./research-scoring-rules.md) (9,645 字符，100% 逐字同步)
+4. `/api/v1/challenges/challenge-tbd/materials/research-experiments` $\rightarrow$ 指向 `research-experiments-20261020-source-v1.zip` (已解压审计对齐为 `research-experiments-20261020-source-v1-local/`)
+
+### 19.2 关键规范变更与旧要求清理对照
+
+| 维度 | 旧版历史要求（已废弃清理） | 平台最新正式要求（当前生效） | 工程代码落地与防御机制 |
+| :--- | :--- | :--- | :--- |
+| **派题规模与题量** | 每类固定 5 题，共 25 题；`rules_version: v2` | **1-3-2-3-2 案例版（共 11 题）**：<br>A 随机 1 题（A-01~A-05）、B 固定 3 题（B-01/02/03）、C 固定 2 题（C-01/03）、D 固定 3 题（D-01/02/05，easy/medium/hard）、E 固定 2 题（E-01/02）；<br>`schema_version: 3`，`rules_version: "research-assistant-objective-v3"` | `scripts/validate_submission.py` 优先适配 11 题官方标准，同时保留 25 题历史兼容回退。 |
+| **C 类综述正文上限** | 仅要求 $\ge 800$ 字，无字符上限与引用次数上限 | **`c1-output-limits-v1` 铁律**：<br>1. 正文（`## 参考文献` 之前）硬上限 $\le 5000$ 字符（建议 3500 字左右），**超限直接判无效 0 分**；<br>2. 正文中引用标记总数不得超过 40 次（同一自然段内重复标注必须合并）。 | `SurveyHandler` 正文在生成及后处理环节强制执行两阶段双向守卫：<br>- 引用标记超出 35 次时自动合并/精简超限标记；<br>- 正文超出 4500 字符时自动在段落边界平滑截断，确保 $800 \le \text{len} \le 5000$。 |
+| **E 类 Idea 正文上限** | 仅要求 $\ge 800$ 字，无字符上限 | **`c1-output-limits-v1` 铁律**：<br>正文硬上限 $\le 4500$ 字符（建议 1800~3200 字），**超限直接判无效 0 分**；严禁程序动态拼接扩写。 | `IdeaHandler` 的 `_ensure_length_compliance` 引入上限截断守卫，确保 $1600 \le \text{len} \le 4100$。修复了原有 E-02 历史落盘文件 (4764 字符) 超限的隐患。 |
+| **单题云端执行时限** | 旧默认超时 180 秒 | **云端运行时限（2026-10-24 明确）**：<br>- A/B 类单题 `/solve` 最长 540 秒；<br>- C/D/E 类单题最长 900 秒；<br>- D 类平台执行 840s、RPC 870s、客户端 880s（包含在单题总预算内）。 | 调度器与熔断守护器依据题目类别赋予充裕预算，避免误触发短超时熔断。 |
+| **D 类实验准入** | 旧版四函数脚手架 / 镜像内置完整算法 / helper 模拟分 | **`layered-d-v3` + `d-model-source-v1` 铁律**：<br>必须通过赛事 Gateway 由模型生成完整代码，落盘 `generation-response.json` 与 `implementation.py`，经 Python 3.9 AST 校验后由平台 runner 验源并隔离执行。 | 彻底清理旧版 D-01 4-function helper 概念，全面固化 AST 前检自愈与官方 runner 统一接口。 |
+
+### 19.3 交付全量校验状态
+
+- **75 项 Pytest 自动化测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **74 passed, 1 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**（含新版 5000/4500 字上限及 40 次引用上限校验）；
+- **Docker 镜像及交付包更新**：
+  - 镜像名称：`research-agent:v1.2.6` / `research-agent:latest`
+  - 导出归档：
+    - `research-agent-v1.2.6.tar` (203 MB, SHA-256: `fd373a2cb218e506289211c0dc8333cb7b717279136b06f605cb7304074e7f25`)
+    - `research-agent-v1.2.6.tar.gz` (202M, SHA-256: `c53fa30493c999e66176e30027eb2834c6a871381a583fee50dd39ef2943f4a0`)
 
 
 
