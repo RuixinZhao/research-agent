@@ -30,3 +30,4 @@ downloaded_repositories/
 calibration/
 data/
 .env
+research-experiments-*-local/

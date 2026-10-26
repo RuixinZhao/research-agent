@@ -64,32 +64,32 @@ class ChatHandler(BaseHandler):
             cleaned = re.sub(r"\s*```$", "", cleaned)
             cleaned = cleaned.strip()
 
+        answer = ""
+        question = ""
+
         try:
             data = json.loads(cleaned)
             if isinstance(data, dict):
-                answer = data.get("answer", "")
-                question = data.get("clarifying_question", "")
-                if answer and question:
-                    return {"answer": answer.strip(), "clarifying_question": question.strip()}
+                answer = str(data.get("answer", "")).strip()
+                question = str(data.get("clarifying_question", "")).strip()
         except Exception as e:
             logger.warning(f"Direct JSON parse failed for {task.case_id}: {e}. Fallback to regex extraction.")
 
-        # 正则降级提取
-        answer_match = re.search(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"', cleaned)
-        question_match = re.search(r'"clarifying_question"\s*:\s*"((?:\\.|[^"\\])*)"', cleaned)
+        # 若直接解析未取得完整字段，正则降级提取
+        if not answer or not question:
+            answer_match = re.search(r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"', cleaned)
+            question_match = re.search(r'"clarifying_question"\s*:\s*"((?:\\.|[^"\\])*)"', cleaned)
 
-        answer = ""
-        question = ""
-        if answer_match:
-            try:
-                answer = json.loads(f'"{answer_match.group(1)}"')
-            except Exception:
-                answer = answer_match.group(1)
-        if question_match:
-            try:
-                question = json.loads(f'"{question_match.group(1)}"')
-            except Exception:
-                question = question_match.group(1)
+            if not answer and answer_match:
+                try:
+                    answer = json.loads(f'"{answer_match.group(1)}"')
+                except Exception:
+                    answer = answer_match.group(1)
+            if not question and question_match:
+                try:
+                    question = json.loads(f'"{question_match.group(1)}"')
+                except Exception:
+                    question = question_match.group(1)
 
         # 终极兜底默认值（严格对齐变量范围限定）
         if not answer:
@@ -109,6 +109,18 @@ class ChatHandler(BaseHandler):
             if not boundary_words:
                 answer = f"作为专职科研助手，该需求已超出学术科研专业范围，无法直接提供文学创作服务。从计算语言学与自然语言处理视角，{answer}"
 
+        # 长度与终结符约束守护（严格控制在 150 ~ 300 字符内，标点规范）
+        if len(answer) > 300:
+            truncated = answer[:300]
+            last_punct = max(truncated.rfind("。"), truncated.rfind("；"), truncated.rfind("！"))
+            if last_punct >= 150:
+                answer = truncated[:last_punct + 1]
+            else:
+                answer = truncated
+
+        if not question.endswith(("？", "?")):
+            question = question.rstrip("。，；,;!！") + "？"
+
         return {"answer": answer, "clarifying_question": question}
 
     def handle(self, task: ChallengeTaskInput, session_id: str) -> Dict[str, Any]:
@@ -116,19 +128,21 @@ class ChatHandler(BaseHandler):
         执行 A 类对话任务：
         1. 组装学术科研提示词（聚焦学术深度与科研变量/数据范围限定）；
         2. 调用 LLM 获得结构化解答与范围限定追问；
-        3. Pydantic 校验标准输出字段；
-        4. 写入队伍工作区并执行回读核验。
+        3. 异常自愈兜底与 Pydantic 严格类型校验；
+        4. 写入队伍工作区并执行双写一致性回读核验。
         """
-        prompt = self._build_prompt(task)
-        
-        response_str = self.llm.chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            session_id=session_id,
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-        
-        parsed = self._parse_response(response_str, task)
+        try:
+            prompt = self._build_prompt(task)
+            response_str = self.llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                session_id=session_id,
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+            parsed = self._parse_response(response_str, task)
+        except Exception as e:
+            logger.error(f"ChatHandler LLM call/parse exception for {task.case_id}: {e}", exc_info=True)
+            parsed = self._parse_response("", task)
 
         # 强类型过滤与校验
         validated_output = ChatOutput(
