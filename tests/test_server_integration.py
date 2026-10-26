@@ -17,6 +17,13 @@ def isolated_server_env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "WORKSPACE_OUTPUT", str(output_dir))
     return output_dir
 
+def test_server_health_telemetry_endpoint():
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("status") in ["ok", "healthy"]
+    assert data.get("telemetry_configured") is True
+
 def test_server_chat_endpoint(isolated_server_env):
     payload = {
         "case_id": "A-01",

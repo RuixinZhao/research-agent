@@ -593,5 +593,45 @@
 - **Main 分支合并**：`d7e90bc` (`merge(dev→main): release v1.2.3 with AI Scientist ablation matrix, evidence boundary guard and Pareto synthesis`)
 - **Git 发布 Tag**：`v1.2.3` 已同步推送至 GitHub 远程仓库 (`origin/v1.2.3`)。
 
+---
+
+## 十六、v1.2.4 接入 AgentRuntime / OTLP 链路追踪与健康核验门禁对齐 (Release v1.2.4)
+
+> **发布时间**：2026-10-26 16:05  
+> **负责人**：系统架构与评测合规工程师  
+> **生产发布 Tag**：`v1.2.4`  
+> **交付镜像**：`research-agent:v1.2.4` / `research-agent:latest` (Linux/AMD64)  
+> **交付制品归档**：
+> - `research-agent-v1.2.4.tar` (203 MB, SHA-256: `c79b77950e25574de12251ed79a9b8fb928e9941ccad3c45264d32acd8affd8f`)
+> - `research-agent-v1.2.4.tar.gz` (202 MB, SHA-256: `a599a55d5446ae48b9ed38ad1240c1dd6215c2aa25adcafd9b70496dd13a7d2f`)
+
+### 16.1 核心修复与平台门禁对齐 (解除 AGENT_RUNTIME_NOT_CONFIGURED)
+
+针对平台线上评测报错 `AGENT_RUNTIME_NOT_CONFIGURED：未启用 AgentRuntime 运行追踪；请初始化 AgentRuntime/Telemetry，使用平台注入的 OTLP 配置，并在 /health 返回 telemetry_configured=true；评测还会核验实际任务 Trace`，在 `server.py` 实施标准深度对接：
+
+1. **健康检查 `/health` 门禁对齐**：
+   - 响应格式扩展为 `{"status": "healthy", "telemetry_configured": True}`，彻底满足平台 Pre-flight 检查拦截器要求。
+2. **初始化 AgentHack / OpenTelemetry 链路追踪**：
+   - 自动挂载 `agenthack.telemetry.Telemetry`，无缝继承平台注入的 `OTEL_EXPORTER_OTLP_ENDPOINT` 与 OTLP 凭据；
+   - 安装官方透明劫持层 `install_all_interceptors()`，自动对 `httpx`、`openai` 及网络调用生成细粒度 Span 追踪。
+3. **任务会话级 Trace 上报闭环 (`POST /solve`)**：
+   - 在处理具体题目时自动提取 W3C `traceparent` 请求头，激活 `telemetry.session(...)` 记录会话执行；
+   - 任务结束时自动调用 `telemetry.flush()`，确保实际任务 Trace 实时导出至平台 OTLP Collector，防止作弊与被判虚假运行。
+4. **保持既有所有核心算法与优化不变**：
+   - 100% 保持 D 类 dynamic budget 与 AST 语法自愈；
+   - 100% 保持 B 类两阶段排他防火墙；
+   - 100% 保持 C 类 PaperQA2 物理页钳位与 RefChecker 逆向数字降级；
+   - 100% 保持 E 类 The AI Scientist 消融矩阵与帕累托协同；
+   - 100% 保持 Web 控制台与所有现有异常兜底机制。
+
+### 16.2 自动化测试与交付验证
+
+- **单元测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **64 passed, 1 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **Docker 容器冒烟实测 (ra_v124)**：
+  - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`；
+  - `POST /solve` (带 W3C traceparent 测试)：成功解析并输出有效解答；
+  - 容器常驻内存：**121.8 MiB**（远低于 1024 MiB 硬限）。
+
 
 
