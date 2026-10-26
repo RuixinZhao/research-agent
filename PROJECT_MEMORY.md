@@ -846,8 +846,8 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
 ## 二十一、v1.2.8 生产交付：彻底解决 D-02/D-05 3 次重试 4m21s 平台超时与 Token 预算失控
 
 > **交付制品归档**：
-> - `research-agent-v1.2.8.tar` (203 MB, SHA-256: `de3da8f6175dc2bfd10c1a21da734d9bbb0fed38e3c3de3985d059cbeb586b6a`)
-> - `research-agent-v1.2.8.tar.gz` (202 MB, SHA-256: `1104af8c55ec466b82e7384528411c954587525c7bbec44f8b4f5ae9cb1f4816`)
+> - `research-agent-v1.2.8.tar` (202 MB, SHA-256: `ffe05aabf1ce52c45507b245024907d0d9043ca16e188cc658dc30b812105187`)
+> - **重新构建时间**: 2026-10-26 19:26（4个 Session 全部完成后，确认 77 passed 3 skipped + 25/25 precheck，重新打包交付）
 
 ### 21.1 线上实测致命故障复盘 (D-02 与 D-05 4m21s 崩溃链条)
 
