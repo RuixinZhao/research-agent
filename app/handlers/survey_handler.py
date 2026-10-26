@@ -227,7 +227,7 @@ class SurveyHandler(BaseHandler):
    结尾必须包含 `## 参考文献` 独立小节，按规范列出全部被引用文献。
 """
 
-        guard = TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=165)
+        guard = TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=140)
         raw_markdown = ""
         try:
             with guard:
@@ -238,7 +238,7 @@ class SurveyHandler(BaseHandler):
                     ],
                     session_id=session_id,
                     temperature=0.1,
-                    max_tokens=3000
+                    max_tokens=2200
                 )
         except (TaskTimeoutException, Exception) as e:
             logger.warning(f"SurveyHandler: Generation exception or timeout for {task.case_id}: {e}")

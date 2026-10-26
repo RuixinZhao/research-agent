@@ -39,7 +39,7 @@ class LLMGatewayClient:
     """
     def __init__(self):
         self.client = httpx.Client(
-            timeout=httpx.Timeout(connect=10.0, read=70.0, write=10.0, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=110.0, write=10.0, pool=10.0),
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         )
 
@@ -88,8 +88,8 @@ class LLMGatewayClient:
                 client = openai.OpenAI(
                     base_url=clean_url,
                     api_key=api_key,
-                    timeout=70.0,
-                    max_retries=1
+                    timeout=110.0,
+                    max_retries=0
                 )
                 create_kwargs: Dict[str, Any] = {
                     "model": model,
@@ -125,6 +125,9 @@ class LLMGatewayClient:
                     except Exception:
                         pass
                 return content
+            except (openai.APITimeoutError, httpx.TimeoutException) as e_to:
+                logger.warning(f"OpenAI SDK call timed out (110s): {e_to}")
+                raise
             except Exception as e_sdk:
                 logger.warning(f"OpenAI SDK invocation fell back to httpx: {e_sdk}")
 

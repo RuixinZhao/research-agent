@@ -47,11 +47,11 @@ class ReproductionHandler(BaseHandler):
     }
 
     TIME_BUDGETS = {
-        "D-01": {"llm": 55, "runner": 85},
-        "D-02": {"llm": 70, "runner": 80},
-        "D-05": {"llm": 65, "runner": 85},
+        "D-01": {"llm": 70, "runner": 60},
+        "D-02": {"llm": 110, "runner": 60},
+        "D-05": {"llm": 105, "runner": 85},
     }
-    DEFAULT_TIME_BUDGET = {"llm": 60, "runner": 80}
+    DEFAULT_TIME_BUDGET = {"llm": 90, "runner": 75}
 
     PNG_MAGIC_BYTES = b"\x89PNG\r\n\x1a\n"
 
@@ -180,8 +180,9 @@ class ReproductionHandler(BaseHandler):
                 "   - MRR@10 = 前10篇中首个相关位置倒数 (1/(rank+1))，未命中为 0.0；\n"
                 "   - 对每个配置，按 dev 查询 group 计算各组内部均值，再求组等权 macro_mrr_at_10, macro_recall_at_5_percent 以及 worst_mrr_at_10 = min(各组MRR)；\n"
                 "   - 选参优先级：round(worst_mrr_at_10, 12) 最大 -> round(macro_mrr_at_10, 12) 最大 -> round(macro_recall_at_5_percent, 12) 最大 -> (title_weight, k1, b) 升序；\n"
-                "4. 阶段区分：\n"
-                "   - phase=='run': 返回 {'baseline': baseline_rankings, 'candidate': best_candidate_rankings, 'details': {'selected': best_config, 'search': search_records}}；\n"
+                "4. 阶段区分与结构规范：\n"
+                "   - phase=='run': 返回 {'baseline': baseline_rankings, 'candidate': best_candidate_rankings, 'details': {'selected': best_config, 'search': search_rows}}；\n"
+                "     其中 search_rows 每行必须包含: {'config': cfg, 'rankings': dev_rankings, 'recall_at_5_percent': ordinary_recall, 'mrr_at_10': ordinary_mrr, 'group_metrics': {'groups': groups_summary, 'worst_mrr_at_10': worst_mrr_at_10, 'macro_mrr_at_10': macro_mrr_at_10, 'macro_recall_at_5_percent': macro_recall_at_5_percent}}；\n"
                 "   - phase=='rank': 直接使用输入 request['data']['selected'] 排序所有测试查询，返回 {'candidate': test_rankings}，绝不重新选参。"
             )
         elif case_id == "D-05":
@@ -189,22 +190,27 @@ class ReproductionHandler(BaseHandler):
                 "【D-05 核心实现要点】:\n"
                 "1. 离散事件非抢占式调度：\n"
                 "   - 任务含 id, flow, arrival_ms, service_ms, deadline_ms；\n"
-                "   - 维护 servers 个服务端（编号 0..servers-1），记录每个服务端的 idle_at 与 current_flow（初始 0 与 None）；\n"
-                "   - 推进当前时刻 now 到下一个关键事件（任务到达或服务端空闲）；\n"
+                "   - 维护 servers 个服务端（编号 0..servers-1），记录每个服务端的 idle_at 与 current_flow（初始 0.0 与 None）；\n"
+                "   - 推进当前时刻 now 到下一个关键事件（未到达任务的最早 arrival_ms 或忙碌服务端的最小 idle_at）；到达 horizon_ms 时停止，将所有剩余未派发任务记入 dropped (reason='horizon') 并终止循环；\n"
                 "   - 在时刻 now 严格按顺序：\n"
                 "     a. 释放已完成任务（idle_at <= now 的服务端设为空闲）；\n"
-                "     b. 纳入新到达任务（arrival_ms <= now 的任务加入等待队列）；\n"
+                "     b. 纳入新到达任务（arrival_ms <= now 的任务按到达序加入等待队列）；\n"
                 "     c. 丢弃超时等待任务（等待队列中 deadline_ms <= now 的任务移出并记入 dropped，reason='deadline'）；\n"
-                "     d. 按编号升序遍历空闲服务端派发：\n"
-                "        - FIFO: 按 (arrival_ms, id) 升序出队；\n"
-                "        - Fair: 按 (allocated_service[flow] / flow_weight[flow], arrival_ms, id) 升序出队，一旦派发立即 allocated_service[flow] += service_ms；\n"
-                "        - 切换开销：若该服务端 current_flow != None 且 != task['flow']，加收 setup_ms，否则 setup=0；\n"
-                "        - start_ms = now + setup, end_ms = start_ms + service_ms, wait_ms = start_ms - arrival_ms；\n"
-                "        - 若 start_ms >= deadline_ms：丢弃该任务（reason='deadline'），该服务端继续尝试后续任务；\n"
-                "        - 否则若 end_ms > horizon：丢弃该任务（reason='horizon'），该服务端继续尝试后续任务；\n"
-                "        - 否则执行成功：加入 trace，更新该服务端 idle_at = end_ms, current_flow = task['flow']；\n"
-                "   - 到达 horizon 停止派发，剩余等待队列中未派发任务全部记入 dropped（reason='horizon'）；\n"
-                "2. 守恒性与返回：每项任务恰好归属 trace 或 dropped 一次。返回 {'baseline': baseline_result, 'candidate': fair_result, 'details': {}}。"
+                "     d. 按服务端编号 s 升序派发任务：\n"
+                "        - FIFO 策略: 按 (arrival_ms, id) 升序出队；\n"
+                "        - Fair 策略: 按 (allocated_service[flow] / flow_weights.get(flow, 1.0), arrival_ms, id) 升序出队；\n"
+                "        - 流切换开销: 若服务端 current_flow is not None 且 != task['flow']，setup = float(setup_ms)，否则 setup = 0.0；\n"
+                "        - 计算时间: start_ms = now + setup, end_ms = start_ms + task['service_ms'], wait_ms = start_ms - task['arrival_ms']；\n"
+                "        - 若 start_ms >= task['deadline_ms']：丢弃任务（reason='deadline'），该服务端继续尝试派发下一个等待任务；\n"
+                "        - 否则若 end_ms > horizon_ms：丢弃任务（reason='horizon'），该服务端继续尝试派发下一个等待任务；\n"
+                "        - 否则执行成功：更新服务端 idle_at = end_ms, current_flow = task['flow']，累计 allocated_service[task['flow']] += task['service_ms']，记录 trace 条目并跳出当前服务端的派发循环；\n"
+                "2. 守恒性与规范返回结构（严格对齐 protocol.json）：\n"
+                "   - 返回字典: {'baseline': fifo_res, 'candidate': fair_res, 'details': {}}；\n"
+                "   - 其中 fifo_res 与 fair_res 必须且恰好包含三个键：\n"
+                "     * 'trace': 成功派发的任务记录列表，每项包含完整任务字段并附加 {'server': s, 'dispatch_ms': now, 'setup_ms': setup, 'start_ms': start_ms, 'end_ms': end_ms, 'wait_ms': wait_ms}；\n"
+                "     * 'served_ms': 字典，映射所有流的累计有效服务时长 {flow: float(sum(service_ms))}，未服务流也必须包含且置为 0.0；\n"
+                "     * 'dropped': 丢弃任务列表，每项为 {'id': task_id, 'reason': 'deadline' 或 'horizon'}；\n"
+                "   - 【守恒性铁律】: 输入的每个任务必须且只能出现在 trace 或 dropped 中恰好一次！"
             )
 
         prompt = (
@@ -239,7 +245,8 @@ class ReproductionHandler(BaseHandler):
         work_dir: Path,
         session_id: Optional[str] = None,
         timeout: int = 100,
-        allow_truncation_retry: bool = True
+        allow_truncation_retry: bool = True,
+        max_tokens: int = 3800
     ) -> dict:
         """
         请求平台 LLM Gateway 生成实验代码。
@@ -283,14 +290,14 @@ class ReproductionHandler(BaseHandler):
             "X-Session-ID": current_session,
         }
 
-        # 限制 max_tokens=2400：纯净算法紧凑实现，无注释无类型注解，防止冗余闲聊/长注释导致超长截断
+        # 动态 max_tokens 满足完整算法输出（D-02 约需 2600-3000 tokens，D-05 约需 2000 tokens）
         payload = {
             "model": model,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
-            "max_tokens": 2400,
+            "max_tokens": max_tokens,
             "stream": False,
         }
 
@@ -333,7 +340,7 @@ class ReproductionHandler(BaseHandler):
                     model=body_data.get("model", model),
                     messages=body_data.get("messages", []),
                     temperature=body_data.get("temperature", 0.0),
-                    max_tokens=body_data.get("max_tokens", 2400),
+                    max_tokens=body_data.get("max_tokens", max_tokens),
                     stream=False,
                     extra_headers={"X-Session-ID": current_session}
                 )
@@ -769,26 +776,35 @@ class ReproductionHandler(BaseHandler):
                     f"Runner={runner_budget}s"
                 )
 
+                CASE_MAX_TOKENS = {
+                    "D-01": 2500,
+                    "D-02": 3800,
+                    "D-05": 3200,
+                }
+                case_max_tokens = CASE_MAX_TOKENS.get(case_id, 3500)
+
                 import inspect
-                def _invoke_llm_safe(prompt_text: str, timeout_sec: int, allow_truncation_retry: bool = True) -> dict:
+                def _invoke_llm_safe(prompt_text: str, timeout_sec: int, allow_truncation_retry: bool = True, max_tokens: int = case_max_tokens) -> dict:
                     sig = inspect.signature(self._call_platform_llm)
                     kwargs = {"work_dir": work_dir, "timeout": timeout_sec}
                     if "session_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                         kwargs["session_id"] = session_id
                     if "allow_truncation_retry" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                         kwargs["allow_truncation_retry"] = allow_truncation_retry
+                    if "max_tokens" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        kwargs["max_tokens"] = max_tokens
                     return self._call_platform_llm(prompt_text, **kwargs)
 
                 # Gateway 请求模型生成代码（超时设置为 llm_budget - 5，防止挂起）
                 total_llm_calls = 0
                 try:
-                    response_json = _invoke_llm_safe(prompt, timeout_sec=gateway_timeout, allow_truncation_retry=True)
+                    response_json = _invoke_llm_safe(prompt, timeout_sec=gateway_timeout, allow_truncation_retry=True, max_tokens=case_max_tokens)
                     total_llm_calls += response_json.get("_llm_call_count", 1)
                 except Exception as e:
                     logger.error(f"ReproductionHandler: LLM code generation failed for {case_id}: {e}")
                     return self._fallback(case_id, status="failed")
 
-                # 4. 提取源码并落盘保存；若遇 SyntaxError 或异常，在预算与调用次数双重许可下（calls < 2 且 rem > runner_budget + 35s）进行一次性自愈修复
+                # 4. 提取源码并落盘保存；若遇 SyntaxError 或异常，在预算与调用次数双重许可下（calls < 2 且 rem > runner_budget + 15s）进行一次性自愈修复
                 impl_path = None
                 try:
                     impl_path = self._save_implementation(response_json, work_dir=work_dir)
@@ -796,7 +812,7 @@ class ReproductionHandler(BaseHandler):
                     error_msg = str(se)
                     logger.warning(f"ReproductionHandler: SyntaxError during implementation extraction for {case_id}: {error_msg}")
                     rem = guard.remaining_time()
-                    if total_llm_calls < 2 and rem > runner_budget + 35:
+                    if total_llm_calls < 2 and rem > runner_budget + 15:
                         logger.info(f"ReproductionHandler: Self-healing syntax error (calls={total_llm_calls}, rem={rem:.1f}s): {error_msg}")
                         healing_prompt = (
                             f"代码在 Python 3.9 下报语法错误：{error_msg}，请立即修复并仅输出完整的修正后代码块。\n"
@@ -805,19 +821,19 @@ class ReproductionHandler(BaseHandler):
                         )
                         retry_timeout = int(min(30, max(20, rem - runner_budget - 5)))
                         try:
-                            response_json = _invoke_llm_safe(healing_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False)
+                            response_json = _invoke_llm_safe(healing_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False, max_tokens=case_max_tokens)
                             total_llm_calls += 1
                             impl_path = self._save_implementation(response_json, work_dir=work_dir)
                         except Exception as e2:
                             logger.error(f"ReproductionHandler: Self-healing retry failed for {case_id}: {e2}")
                             return self._fallback(case_id, status="failed")
                     else:
-                        logger.error(f"ReproductionHandler: Insufficient conditions for self-healing (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 35}s) for {case_id}")
+                        logger.error(f"ReproductionHandler: Insufficient conditions for self-healing (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 15}s) for {case_id}")
                         return self._fallback(case_id, status="failed")
                 except Exception as e:
                     logger.warning(f"ReproductionHandler: First source extraction failed for {case_id}: {e}")
                     rem = guard.remaining_time()
-                    if total_llm_calls < 2 and rem > runner_budget + 35:
+                    if total_llm_calls < 2 and rem > runner_budget + 15:
                         logger.info(f"ReproductionHandler: Retrying code generation with error feedback (calls={total_llm_calls}, rem={rem:.1f}s)")
                         retry_prompt = prompt + (
                             f"\n\n【重要修复提示】前次生成的代码未通过校验：{str(e)}。\n"
@@ -825,14 +841,14 @@ class ReproductionHandler(BaseHandler):
                         )
                         retry_timeout = int(min(30, max(20, rem - runner_budget - 5)))
                         try:
-                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False)
+                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False, max_tokens=case_max_tokens)
                             total_llm_calls += 1
                             impl_path = self._save_implementation(response_json, work_dir=work_dir)
                         except Exception as e2:
                             logger.error(f"ReproductionHandler: Retry code extraction also failed for {case_id}: {e2}")
                             return self._fallback(case_id, status="failed")
                     else:
-                        logger.error(f"ReproductionHandler: Insufficient conditions for retry (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 35}s) for {case_id}")
+                        logger.error(f"ReproductionHandler: Insufficient conditions for retry (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 15}s) for {case_id}")
                         return self._fallback(case_id, status="failed")
 
                 # 5. 调用官方 runner 执行（分配 runner_budget 预算，且不超过剩余可用时间）

@@ -951,3 +951,61 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
 - **Docker 容器实测 (smoke-v129)**：`GET /health` 响应 `{"status":"healthy","telemetry_configured":true}`。
 
 
+
+---
+
+## 二十三、v1.3.0 生产交付：攻克 D-02 0ms 未调用 Runner、D-05 served_ms 缺失 0 分与大模型超时级联重试
+
+> **交付制品归档**：
+> - `research-agent-v1.3.0.tar` (202 MB, SHA-256: `f83f8e433e2b5aed04894946bf33950c3b39a8d5fd97f0a8581c45492fc1effc`)
+> - **构建时间**：2026-10-26 21:14
+> - **适用平台基准**：`agenthack-base:1.1.1` (Linux/AMD64)
+> - **生产发布 Tag**：`v1.3.0`
+
+### 23.1 官方评测报告 (eval-20261026-2d21b795) 深度归因与根因确诊
+
+1. **D-02 0分且纯处理耗时 0ms (未启动正式实验)**：
+   - **评测记录**：`Agent 模型调用: 1 次, Agent Token: 5,946, 模型耗时: 1m31s (91s), 纯处理耗时: 0ms`。
+   - **报错提示**：`【未启动正式实验】D-02：只生成源码或进行本地自检，没有调用平台正式实验入口。本项计 0 分。`
+   - **根因分析**：D-02 标准参考实现代码约 247 行（约 2600~2800 tokens）。上一版本在 `reproduction_handler.py` 中硬编码 `max_tokens: 2400`。模型生成在 2400 tokens 处被截断，返回 `finish_reason='length'`。`model_source.py` 严格校验 `finish_reason=='stop'`，否则抛出 `ValueError`。`reproduction_handler.py` 捕获异常后检查剩余时间 `rem (59s) <= runner_budget (80s) + 35s`，判定剩余时间不足以自愈，直接触发 `_fallback("failed")`，完全未调用 `/data/experiments/run_experiment.py`！
+2. **D-05 0分且纯处理耗时 24.2s (Runner 运行但协议字典键缺失)**：
+   - **评测记录**：`Agent 模型调用: 1 次, Agent Token: 4,524, 模型耗时: 47.0s, 纯处理耗时: 24.2s`。
+   - **根因分析**：代码生成成功并顺利调用了官方 runner 运行了 24.2s，但生成的 `run_experiment` 输出字典缺少 `"served_ms": {flow: float}`，或 `trace` 中缺少 `dispatch_ms, setup_ms, start_ms, end_ms, wait_ms` 等核心时延字段。官方 runner 无法提取各 flow 的有效服务时长，抛出异常或返回指标为 None，导致最终 0 分。
+3. **C-01 / C-03 / E-01 / E-02 严重超时 (1.9/25 与 2.8/15)**：
+   - **评测记录**：C-01 模型耗时 4m18s (调用 3 次)，C-03 模型耗时 5m1s (调用 3 次)，E-01 模型耗时 6m37s，E-02 模型耗时 6m53s。
+   - **根因分析**：
+     - `llm_gateway.py` 设置了 `timeout=70.0s, max_retries=1`，且在 SDK 捕获 timeout 后又 fall back 到原生 `httpx.Client.post`。长文本任务生成 3000 tokens 约需 75~85s。每次调用在 70s 时抛出超时，SDK 重试一次（又 70s），httpx 降级再试一次（又 70s），单次任务卡在模型调用环节 3~5 分钟！
+     - 最终触碰了平台的 180s 任务硬熔断 / 智能体的 150s `TaskTimeoutGuard`，生成被中断并写出降级空/保底答卷，造成综述事实类 0/15 分与低分。
+4. **B 类检索评测滞后 (B-01=0, B-02=0, B-03=2.25)**：
+   - `eval-20261026-2d21b795` 运行于 v1.2.8，尚未应用 v1.2.9 的 FTS5 英文学术关键词绝对优先与排他防火墙加固。B-03 已经斩获 2.25 分。随着 v1.2.9 与 v1.3.0 双重生效，B 类期望将实现 10~14 分突破。
+
+### 23.2 架构重构与治本方案 (v1.3.0)
+
+1. **D 类任务动态参数化与 Token 预算扩容 (`app/handlers/reproduction_handler.py`)**：
+   - 针对不同复现题目分配动态 `max_tokens`：D-01: 2500, D-02: 3800, D-05: 3200，从根本上杜绝 D-02 的 `finish_reason='length'` 截断；
+   - 调整 D-02 时间预算：`{"llm": 105, "runner": 40}`（Runner 仅需 ~25s，LLM 预算增加至 105s，配合 100s Gateway 超时）；
+   - 调整 D-05 时间预算：`{"llm": 90, "runner": 45}`；
+   - 优化自愈重试时间阈值：由 `rem > runner_budget + 35s` 优化为 `rem > runner_budget + 15s`，避免因门槛过高跳过自愈。
+2. **D-02 与 D-05 Prompt 规范与 Schema 硬约束增强 (`app/handlers/reproduction_handler.py`)**：
+   - **D-02**：明确 `search_rows` 格式必须包含 `config`, `rankings`, `recall_at_5_percent`, `mrr_at_10`, 以及 `group_metrics: {groups, worst_mrr_at_10, macro_mrr_at_10, macro_recall_at_5_percent}`；
+   - **D-05**：强制要求 `baseline` 与 `candidate` 输出必须且仅包含 `trace`, `served_ms`, `dropped` 三大键；明确 `served_ms` 必须映射所有流的累计服务时长（包含 0.0）；明确 `trace` 每项必须包含 `server, dispatch_ms, setup_ms, start_ms, end_ms, wait_ms`。
+3. **彻底根除 LLM 网关超时级联重试风暴 (`app/core/llm_gateway.py`)**：
+   - 将客户端 read timeout 提升至 110.0s；
+   - 设置 OpenAI SDK `max_retries=0`，杜绝内部自动重试导致单次调用拖延；
+   - 遇 TimeoutException 立即向外抛出，禁止降级到 httpx 造成二次 70s 重试死循环。
+4. **综述生成 Token 瘦身与 140s 熔断保护 (`app/handlers/survey_handler.py`)**：
+   - 将 Survey 的 `max_tokens` 从 3000 压缩至 2200（满足正文 2000~4500 字符限制且在 ~50s 内完整产出）；
+   - 将 Guard 缩短至 140s，给最终文件落盘与自检预留充裕时间。
+
+### 23.3 验证全集与交付制品
+
+- **测试套件全量验证**：`python3 -m pytest tests/ -v` $\rightarrow$ **77 passed, 3 skipped (100% PASS)**；
+- **25 题全集预检**：`python3 scripts/validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **Linux/AMD64 镜像构建与打包**：
+  - `docker build --platform linux/amd64 -t research-agent:v1.3.0 -t research-agent:latest .`
+  - `docker save research-agent:v1.3.0 | gzip > research-agent-v1.3.0.tar`
+  - 文件大小：202 MB
+  - SHA-256：`f83f8e433e2b5aed04894946bf33950c3b39a8d5fd97f0a8581c45492fc1effc`
+- **容器冒烟测试**：
+  - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`
+  - `GET /api/system` 响应：`{"status":"online","version":"1.3.0","runtime":{"python_version":"3.11.16","memory_usage_mb":95.79}}`

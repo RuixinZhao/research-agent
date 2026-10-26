@@ -125,7 +125,8 @@ def test_dockerfile_and_dockerignore_compliance():
     """Verify Dockerfile and .dockerignore packaging includes research-experiments-20261020-source-v1-local."""
     dockerfile_text = (ROOT_DIR / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY research-experiments-20261020-source-v1-local /app/research-experiments-20261020-source-v1-local" in dockerfile_text
-    assert 'LABEL version="1.2.8"' in dockerfile_text or 'LABEL version="1.2.7"' in dockerfile_text
+    import re
+    assert re.search(r'LABEL version="1\.[23]\.\d+"', dockerfile_text) is not None
 
     dockerignore_text = (ROOT_DIR / ".dockerignore").read_text(encoding="utf-8")
     assert "!research-experiments-20261020-source-v1-local" in dockerignore_text
