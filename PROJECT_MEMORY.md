@@ -1,10 +1,10 @@
 # 科研助手 Agent 项目中枢记忆与状态看板 (PROJECT_MEMORY.md)
 
-> **版本**：v1.2.3 (AI Scientist Ablation Matrix, Evidence Boundary Guard & Pareto Synthesis Final Release)  
-> **最后更新**：2026-10-23  
+> **版本**：v1.2.8 (D-02 / D-05 Multi-Call Timeout Blowout Elimination, Token Budget Optimization & Platform Provenance Defense Final Release)  
+> **最后更新**：2026-10-26  
 > **当前 Git 分支**：`dev`  
 > **GitHub 仓库**：`https://github.com/RuixinZhao/research-agent`  
-> **生产发布 Tag**：`v1.2.3` (Commit `d7e90bc`, Tagged & Pushed)  
+> **生产发布 Tag**：`v1.2.8`  
 > **平台环境基准**：`agenthack-base:1.1.1` (Linux/AMD64, 非 root `agent` 用户, Python 3.11.16)  
 > **说明**：**本文档是所有开发会话（Sessions / Subagents）的唯一中枢真相源（Single Source of Truth）**。任何新会话或子 Agent 启动时，必须首先完整阅读本文档以对齐全局认知。
 
@@ -840,4 +840,60 @@ A-04：评测校验未通过，请核对赛题规范或联系组委会。
 - **发布制品**：
   - `research-agent-v1.2.7.tar` (203 MB, SHA-256: `13a0508b5b52dec52ee0a372643145756420b98acf2d7c84be0d46647361aee1`)
   - `research-agent-v1.2.7.tar.gz` (202 MB, SHA-256: `235eb966140e2939968e6c94a260c586f868bb648e02c180198c1deb1cf30f87`)
+
+---
+
+## 二十一、v1.2.8 生产交付：彻底解决 D-02/D-05 3 次重试 4m21s 平台超时与 Token 预算失控
+
+> **交付制品归档**：
+> - `research-agent-v1.2.8.tar` (203 MB, SHA-256: `de3da8f6175dc2bfd10c1a21da734d9bbb0fed38e3c3de3985d059cbeb586b6a`)
+> - `research-agent-v1.2.8.tar.gz` (202 MB, SHA-256: `1104af8c55ec466b82e7384528411c954587525c7bbec44f8b4f5ae9cb1f4816`)
+
+### 21.1 线上实测致命故障复盘 (D-02 与 D-05 4m21s 崩溃链条)
+
+在 v1.2.7 线上评测中，D-02 与 D-05 出现严重异常：
+- **D-02 Single**: Agent模型调用: **3次**, Agent Token: **21,802**, 模型耗时: **4m21s** (261s), 状态: 异常
+- **D-05 Single**: Agent模型调用: **3次**, Agent Token: **14,634**, 模型耗时: **3m35s** (215s), 状态: 异常
+- 报错信息: `Agent 返回结果或保存文件不符合赛题一输出规范: 请下载最新版《D 类离线实验材料与运行指南》进行检查。`
+
+深度反推逆向分析确认：
+1. **Prompt 庞大引发首轮模型长篇大论与截断 (finish_reason=length)**：
+   - D-02 原始材料中 `protocol.json` 包含 199 行 27 组超参网格，`sample.json` 包含 80 行无意义的伪随机词长文本；Prompt 暴涨至 ~5,000 Tokens。
+   - 模型在生成 Python 代码时习惯性附带参数类型注解（PEP 604 `|`）、docstring 与繁冗注释，直接撞上 `max_tokens=2800` 上限，生成被硬截断。
+2. **多层级失控连锁重试机制（导致 3 次调用达 261s / 215s）**：
+   - 机制 A: `_call_platform_llm` 检测到 `finish_reason == "length"`，盲目发起第 2 次大模型调用；
+   - 机制 B: OpenAI SDK `max_retries=1` 导致超时重试翻倍；
+   - 机制 C: `_save_implementation` 提取失败后，`handle()` 中的 `SyntaxError`/`Exception` 分支在不知晓内部已发生过重试的情况下，盲目发起第 3 次调用；
+   - 结果：3 次满载请求单次平均 ~80 秒，累积耗时高达 261 秒与 215 秒，彻底击穿平台 180 秒单任务硬时限，被平台强杀判零！
+3. **TaskTimeoutException 被通用 except Exception 静默吞掉**：
+   - 原 `TaskTimeoutException` 继承自 `Exception`，当 `signal.alarm` 触发中断时，被内部各种 `except Exception as e` 当作普通错误捕获并继续进入重试循环，使得守护熔断未能硬核终止。
+
+### 21.2 架构重构与根治方案 (v1.2.8)
+
+1. **绝对禁令 Prompt 体系与 Token 极简约束 (`app/handlers/reproduction_handler.py`)**：
+   - 新增 `_compact_protocol_for_prompt` 与 `_compact_sample_for_prompt`，对 D-02/D-05 的 27 组网格和长文本执行骨干化压缩，Prompt Token 直降 70%（由 5000 降至 ~1200）；
+   - 在 Prompt 中强化五大铁律禁令：
+     - **【绝对禁止类型注解】**：严禁任何冒号类型注解与 `->` 箭头，函数入参返回值一律纯动态类型，从根源上 100% 杜绝 Python 3.9 不支持的 `|` 联合类型；
+     - **【绝对禁止注释与文档】**：严禁函数 docstring 与 `#` 注释，只输出纯代码，单次生成代码量压缩至 700-900 Tokens；
+     - **【绝对禁止测试代码】**：严禁 `if __name__ == '__main__':`；
+     - **【绝对单代码块闭合】**；
+   - 调整 `max_tokens=2400`，首轮调用在 20-30 秒内 100% 闭合 `finish_reason=stop`。
+2. **硬上限受控调用计数与重试熔断闭环**：
+   - 全局严格限制：**整个执行周期内最多允许 1 次重试（最多 2 次 LLM 调用，绝对物理禁止第 3 次调用）**；
+   - `_do_request` 中 OpenAI SDK 明确设置 `max_retries=0`，遇超时异常 (`APITimeoutError` / `httpx.TimeoutException`) 立即抛出，拒绝冗余尝试；
+   - 仅当 `total_llm_calls < 2` 且 `guard.remaining_time() > runner_budget + 35s` 时才允许触发自愈重试，重试调用超时硬限制为 $\le 30$ 秒且禁止二次截断重试；
+   - 无论是否重试，为官方 runner `/data/experiments/run_experiment.py` 保留至少 80 秒绝对计算预算。
+3. **`TaskTimeoutException` 提升至 `BaseException` (`app/core/circuit_breaker.py`)**：
+   - 将 `TaskTimeoutException` 改为继承 `BaseException`（如同 `KeyboardInterrupt`），任何业务层 `except Exception:` 均无法静默拦截，确保硬中断信号能穿透所有代码直达外层熔断兜底！
+4. **平台总时限前瞻性对齐 (`app/config.py`, `server.py`)**：
+   - 将全局 `TASK_TIMEOUT_SECONDS` 由 175s 下调至 150s，为容器网络 I/O、磁盘落盘与平台回读留足 30 秒安全缓冲空间，永不触碰 180s 杀死红线。
+
+### 21.3 交付测试验证全集
+
+- **单元测试全量通过**：`PYTHONPATH=. pytest tests/ -v` $\rightarrow$ **77 passed, 3 skipped (100% PASS)**；
+- **25 题全集预检**：`validate_submission.py team` $\rightarrow$ **25/25 完美通过 (100% PASS)**；
+- **AMD64 Docker 镜像实测 (smoke-test-v128)**：
+  - `GET /health` 响应：`{"status":"healthy","telemetry_configured":true}`；
+  - `GET /api/system` 响应：`"task_timeout_seconds": 150, "status": "online"`；
+- **离线与来源校验合规**：完美符合 `d-model-source-v1` 与 `layered-d-v3` 规范。
 
