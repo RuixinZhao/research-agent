@@ -98,6 +98,44 @@ class ReproductionHandler(BaseHandler):
 
         return materials
 
+    def _compact_protocol_for_prompt(self, case_id: str, proto_str: str) -> str:
+        """精简 protocol.json 中冗余重复的超参网格，降低 Prompt Token 消耗并加速推理"""
+        if not proto_str:
+            return proto_str
+        try:
+            data = json.loads(proto_str)
+            if isinstance(data, dict) and "grid" in data and isinstance(data["grid"], list) and len(data["grid"]) > 3:
+                total = len(data["grid"])
+                data["grid"] = data["grid"][:2] + [f"... ({total} configs total; iterate request['protocol']['grid'] dynamically)"]
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        except Exception:
+            return proto_str
+
+    def _compact_sample_for_prompt(self, case_id: str, sample_str: str) -> str:
+        """精简 sample.json 中冗长的模拟文档文本，仅保留数据结构骨干，极大降低上下文首字延迟"""
+        if not sample_str:
+            return sample_str
+        try:
+            data = json.loads(sample_str)
+            if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
+                d = data["data"]
+                if "documents" in d and isinstance(d["documents"], list) and len(d["documents"]) > 2:
+                    compact_docs = []
+                    for doc in d["documents"][:2]:
+                        compact_docs.append({
+                            "id": doc.get("id", "doc_0"),
+                            "title": (doc.get("title", "") or "")[:50],
+                            "text": (doc.get("text", "") or "")[:80] + "...",
+                        })
+                    d["documents"] = compact_docs
+                if "dev_queries" in d and isinstance(d["dev_queries"], list) and len(d["dev_queries"]) > 2:
+                    d["dev_queries"] = d["dev_queries"][:2]
+                if "test_queries" in d and isinstance(d["test_queries"], list) and len(d["test_queries"]) > 2:
+                    d["test_queries"] = d["test_queries"][:2]
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        except Exception:
+            return sample_str
+
     def _build_generation_prompt(
         self,
         case_id: str,
@@ -111,8 +149,10 @@ class ReproductionHandler(BaseHandler):
         严格确保 Python 3.9 语法兼容性（严禁 match-case，严禁类型联合 '|'）。
         """
         method = materials.get("method", "")
-        protocol = materials.get("protocol", "")
-        sample = materials.get("sample", "")
+        raw_protocol = materials.get("protocol", "")
+        raw_sample = materials.get("sample", "")
+        protocol = self._compact_protocol_for_prompt(case_id, raw_protocol)
+        sample = self._compact_sample_for_prompt(case_id, raw_sample)
         input_desc = str(task_input or f"请复现 {case_id} 实验，输出指标与图表")
 
         case_hints = ""
@@ -173,8 +213,11 @@ class ReproductionHandler(BaseHandler):
             "【代码风格与安全硬约束】\n"
             "1. 仅使用 Python 3.9 标准库（如 math, re, json, collections, heapq 等）。严禁导入任何第三方库！\n"
             "2. 【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型），必须使用 typing.Union 或省略类型标注！代码必须完全兼容 ast.parse(..., feature_version=(3,9))！\n"
-            "3. 只返回一个完整的 ```python ... ``` 代码块，包含 def run_experiment(request): 及所有必要函数。代码块外严禁任何闲聊或说明文字，严禁提供示例调用或测试代码！\n"
-            "4. 代码紧凑高效，不要冗余长篇注释，确保在单一代码块内完整闭合输出。\n\n"
+            "3. 【禁止类型注解】：为彻底杜绝 Python 3.9 语法错误与联合类型 '|' 违规，严禁在任何函数入参、返回值或变量声明中使用冒号类型注解或 -> 箭头（所有函数与变量全部使用普通 Python 动态类型，例如 def rank_query(query_text, index, k1, b, title_weight):）！\n"
+            "4. 【禁止注释与文档】：严禁编写任何函数/类 docstring（三引号文档字符串），严禁编写任何单行或多行注释（# 注释），只输出纯粹算法可执行代码！\n"
+            "5. 【禁止测试代码】：严禁包含 if __name__ == '__main__': 或任何示例调用与测试数据！\n"
+            "6. 只返回一个完整的 ```python ... ``` 代码块，包含 def run_experiment(request): 及所有必要函数。代码块外严禁任何闲聊、解释或说明文字！\n"
+            "7. 代码必须极度紧凑高效，确保在单一代码块内完整闭合输出。\n\n"
             f"【任务信息】\n{input_desc}\n\n"
             + (f"{case_hints}\n\n" if case_hints else "") +
             f"【公开方法 (method.md)】\n{method}\n\n"
@@ -190,7 +233,14 @@ class ReproductionHandler(BaseHandler):
 
         return prompt
 
-    def _call_platform_llm(self, prompt: str, work_dir: Path, session_id: Optional[str] = None, timeout: int = 100) -> dict:
+    def _call_platform_llm(
+        self,
+        prompt: str,
+        work_dir: Path,
+        session_id: Optional[str] = None,
+        timeout: int = 100,
+        allow_truncation_retry: bool = True
+    ) -> dict:
         """
         请求平台 LLM Gateway 生成实验代码。
         严格处于 AgentRuntime 运行时上下文中（支持 agent.llm Span 审计），
@@ -233,14 +283,14 @@ class ReproductionHandler(BaseHandler):
             "X-Session-ID": current_session,
         }
 
-        # 限制 max_tokens=2800：代码极简紧凑，防止冗余闲聊/长注释导致耗尽80-90秒或被截断
+        # 限制 max_tokens=2400：纯净算法紧凑实现，无注释无类型注解，防止冗余闲聊/长注释导致超长截断
         payload = {
             "model": model,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
-            "max_tokens": 2800,
+            "max_tokens": 2400,
             "stream": False,
         }
 
@@ -277,13 +327,13 @@ class ReproductionHandler(BaseHandler):
                     base_url=clean_url,
                     api_key=api_key,
                     timeout=float(req_timeout),
-                    max_retries=1
+                    max_retries=0
                 )
                 sdk_resp = client.chat.completions.create(
                     model=body_data.get("model", model),
                     messages=body_data.get("messages", []),
                     temperature=body_data.get("temperature", 0.0),
-                    max_tokens=body_data.get("max_tokens", 2800),
+                    max_tokens=body_data.get("max_tokens", 2400),
                     stream=False,
                     extra_headers={"X-Session-ID": current_session}
                 )
@@ -291,11 +341,14 @@ class ReproductionHandler(BaseHandler):
                     return sdk_resp.model_dump()
                 import json
                 return json.loads(sdk_resp.model_dump_json())
+            except (openai.APITimeoutError, httpx.TimeoutException) as e_to:
+                logger.warning(f"ReproductionHandler: LLM call timed out ({req_timeout}s): {e_to}")
+                raise
             except Exception as e_sdk:
                 logger.warning(f"ReproductionHandler: OpenAI SDK call fell back to httpx: {e_sdk}")
 
             # 2. 原生 httpx 降级保底（处于 tel_op 运行时上下文中）
-            timeout_cfg = httpx.Timeout(connect=10.0, read=float(req_timeout), write=10.0, pool=10.0)
+            timeout_cfg = httpx.Timeout(connect=5.0, read=float(req_timeout), write=10.0, pool=10.0)
             with httpx.Client(timeout=timeout_cfg) as client:
                 resp = client.post(endpoint, json=body_data, headers=headers)
                 try:
@@ -307,6 +360,7 @@ class ReproductionHandler(BaseHandler):
         with telemetry_llm_ctx as tel_op:
             # 发起调用
             data = _do_request(payload, timeout)
+            data["_llm_call_count"] = 1
             response_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
             if tel_op and hasattr(tel_op, "set"):
@@ -322,21 +376,23 @@ class ReproductionHandler(BaseHandler):
                 except Exception:
                     pass
 
-            # 检查是否因长度限制截断
+            # 检查是否因长度限制截断（仅在允许截断重试且首次发生时触发最多 1 次）
             choices = data.get("choices", [])
-            if choices and choices[0].get("finish_reason") == "length":
+            if allow_truncation_retry and choices and choices[0].get("finish_reason") == "length":
                 logger.warning("ReproductionHandler: Model output truncated (finish_reason=length). Retrying once...")
                 retry_prompt = (
                     prompt + "\n\n"
                     "【重要修复提示】上一次生成的代码因长度超限被截断（finish_reason=length）。"
-                    "请务必精简代码，仅保留核心算法与必要逻辑，确保在单一 ```python ... ``` 代码块内完整闭合输出 def run_experiment(request):。"
+                    "请务必极度精简代码，严禁任何类型注解，严禁任何注释与文档字符串，仅保留核心算法，确保在单一 ```python ... ``` 代码块内完整闭合输出 def run_experiment(request):。"
                 )
                 payload["messages"] = [
                     payload["messages"][0],
                     {"role": "user", "content": retry_prompt}
                 ]
+                retry_timeout = min(35, timeout)
                 try:
-                    data = _do_request(payload, timeout)
+                    data = _do_request(payload, retry_timeout)
+                    data["_llm_call_count"] = 2
                     response_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                     if tel_op and hasattr(tel_op, "set"):
                         try:
@@ -683,7 +739,7 @@ class ReproductionHandler(BaseHandler):
         case_id = task.case_id.strip()
         logger.info(f"ReproductionHandler: Starting reproduction task for {case_id}")
 
-        guard = TaskTimeoutGuard(case_id=case_id, timeout_seconds=175)
+        guard = TaskTimeoutGuard(case_id=case_id, timeout_seconds=settings.TASK_TIMEOUT_SECONDS)
         try:
             with guard:
                 # 1. 材料源读取
@@ -714,21 +770,25 @@ class ReproductionHandler(BaseHandler):
                 )
 
                 import inspect
-                def _invoke_llm_safe(prompt_text: str, timeout_sec: int) -> dict:
+                def _invoke_llm_safe(prompt_text: str, timeout_sec: int, allow_truncation_retry: bool = True) -> dict:
                     sig = inspect.signature(self._call_platform_llm)
                     kwargs = {"work_dir": work_dir, "timeout": timeout_sec}
                     if "session_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
                         kwargs["session_id"] = session_id
+                    if "allow_truncation_retry" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        kwargs["allow_truncation_retry"] = allow_truncation_retry
                     return self._call_platform_llm(prompt_text, **kwargs)
 
-                # Gateway 请求模型生成代码（超时设置为 llm_budget - 5，防止 httpx 挂起）
+                # Gateway 请求模型生成代码（超时设置为 llm_budget - 5，防止挂起）
+                total_llm_calls = 0
                 try:
-                    response_json = _invoke_llm_safe(prompt, timeout_sec=gateway_timeout)
+                    response_json = _invoke_llm_safe(prompt, timeout_sec=gateway_timeout, allow_truncation_retry=True)
+                    total_llm_calls += response_json.get("_llm_call_count", 1)
                 except Exception as e:
                     logger.error(f"ReproductionHandler: LLM code generation failed for {case_id}: {e}")
                     return self._fallback(case_id, status="failed")
 
-                # 4. 提取源码并落盘保存；若遇 SyntaxError 且剩余时间充裕（> 70s），进行一次性自愈修复
+                # 4. 提取源码并落盘保存；若遇 SyntaxError 或异常，在预算与调用次数双重许可下（calls < 2 且 rem > runner_budget + 35s）进行一次性自愈修复
                 impl_path = None
                 try:
                     impl_path = self._save_implementation(response_json, work_dir=work_dir)
@@ -736,44 +796,47 @@ class ReproductionHandler(BaseHandler):
                     error_msg = str(se)
                     logger.warning(f"ReproductionHandler: SyntaxError during implementation extraction for {case_id}: {error_msg}")
                     rem = guard.remaining_time()
-                    if rem > 70:
-                        logger.info(f"ReproductionHandler: Self-healing syntax error (rem={rem:.1f}s > 70s): {error_msg}")
+                    if total_llm_calls < 2 and rem > runner_budget + 35:
+                        logger.info(f"ReproductionHandler: Self-healing syntax error (calls={total_llm_calls}, rem={rem:.1f}s): {error_msg}")
                         healing_prompt = (
                             f"代码在 Python 3.9 下报语法错误：{error_msg}，请立即修复并仅输出完整的修正后代码块。\n"
-                            "【铁律】：代码必须在标准 Python 3.9 环境下运行，严禁使用 match/case 语句，严禁在类型注解中使用 '|'（联合类型），必须使用 typing.Union 或省略类型标注！确保包含 def run_experiment(request):。"
+                            "【铁律】：严禁使用任何类型注解！严禁使用 match/case！严禁编写任何注释与文档字符串！"
+                            "只输出单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
                         )
-                        retry_timeout = int(min(rem - runner_budget - 5, gateway_timeout))
+                        retry_timeout = int(min(30, max(20, rem - runner_budget - 5)))
                         try:
-                            response_json = _invoke_llm_safe(healing_prompt, timeout_sec=max(30, retry_timeout))
+                            response_json = _invoke_llm_safe(healing_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False)
+                            total_llm_calls += 1
                             impl_path = self._save_implementation(response_json, work_dir=work_dir)
                         except Exception as e2:
                             logger.error(f"ReproductionHandler: Self-healing retry failed for {case_id}: {e2}")
                             return self._fallback(case_id, status="failed")
                     else:
-                        logger.error(f"ReproductionHandler: Insufficient time for self-healing ({rem:.1f}s <= 70s) for {case_id}")
+                        logger.error(f"ReproductionHandler: Insufficient conditions for self-healing (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 35}s) for {case_id}")
                         return self._fallback(case_id, status="failed")
                 except Exception as e:
                     logger.warning(f"ReproductionHandler: First source extraction failed for {case_id}: {e}")
                     rem = guard.remaining_time()
-                    if rem > 70:
-                        logger.info(f"ReproductionHandler: Retrying code generation with error feedback (rem={rem:.1f}s > 70s)")
+                    if total_llm_calls < 2 and rem > runner_budget + 35:
+                        logger.info(f"ReproductionHandler: Retrying code generation with error feedback (calls={total_llm_calls}, rem={rem:.1f}s)")
                         retry_prompt = prompt + (
                             f"\n\n【重要修复提示】前次生成的代码未通过校验：{str(e)}。\n"
-                            "请严格修正，只输出一个包含完整实现的单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
+                            "请严格修正，严禁使用任何类型注解，严禁编写任何注释与文档，只输出一个包含完整实现的单一 ```python ... ``` 代码块，确保包含 def run_experiment(request):。"
                         )
-                        retry_timeout = int(min(rem - runner_budget - 5, gateway_timeout))
+                        retry_timeout = int(min(30, max(20, rem - runner_budget - 5)))
                         try:
-                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=max(30, retry_timeout))
+                            response_json = _invoke_llm_safe(retry_prompt, timeout_sec=retry_timeout, allow_truncation_retry=False)
+                            total_llm_calls += 1
                             impl_path = self._save_implementation(response_json, work_dir=work_dir)
                         except Exception as e2:
                             logger.error(f"ReproductionHandler: Retry code extraction also failed for {case_id}: {e2}")
                             return self._fallback(case_id, status="failed")
                     else:
-                        logger.error(f"ReproductionHandler: Insufficient time for retry ({rem:.1f}s <= 70s) for {case_id}")
+                        logger.error(f"ReproductionHandler: Insufficient conditions for retry (calls={total_llm_calls}, rem={rem:.1f}s <= {runner_budget + 35}s) for {case_id}")
                         return self._fallback(case_id, status="failed")
 
                 # 5. 调用官方 runner 执行（分配 runner_budget 预算，且不超过剩余可用时间）
-                runner_timeout = int(min(runner_budget, max(20, guard.remaining_time() - 3)))
+                runner_timeout = int(min(runner_budget, max(20, guard.remaining_time() - 5)))
                 logger.info(f"ReproductionHandler: Invoking official runner with timeout {runner_timeout}s for {case_id}")
                 submission = self._invoke_official_runner(case_id, impl_path=impl_path, timeout=runner_timeout)
                 if submission and isinstance(submission, dict) and "metrics" in submission:
@@ -798,7 +861,8 @@ class ReproductionHandler(BaseHandler):
 
 
         except TaskTimeoutException:
-            logger.error(f"ReproductionHandler: Task execution timed out (175s guard exceeded) for {case_id}")
+            logger.error(f"ReproductionHandler: Task execution timed out guard exceeded for {case_id}")
+            return self._fallback(case_id, status="failed")
             return self._fallback(case_id, status="failed")
         except Exception as e:
             logger.error(f"ReproductionHandler: Unexpected error for {case_id}: {e}", exc_info=True)

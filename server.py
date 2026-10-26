@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from app.config import settings
+from app.core.circuit_breaker import TaskTimeoutGuard, TaskTimeoutException
 from app.schemas.task import ChallengeTaskInput
 from app.web.router import router as web_router, STATIC_DIR
 
@@ -50,7 +51,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Research-Agent", version="1.2.7", lifespan=lifespan)
+app = FastAPI(title="Research-Agent", version="1.2.8", lifespan=lifespan)
 
 # 挂载前端可视化与具象化控制台
 app.include_router(web_router)
@@ -170,7 +171,6 @@ async def solve(request: Request):
 
             with task_op_ctx as task_op:
                 handler = get_handler(task.function)
-                from app.core.circuit_breaker import TaskTimeoutGuard
                 with TaskTimeoutGuard(case_id=task.case_id, timeout_seconds=settings.TASK_TIMEOUT_SECONDS):
                     result_dict = handler.handle(task, session_id=session_id)
                     if task_op and hasattr(task_op, "result"):
@@ -190,7 +190,7 @@ async def solve(request: Request):
                         resp_headers["X-LLM-Calls"] = str(sess.counters["llm_call_count"])
 
                     return JSONResponse(content=result_dict, headers=resp_headers)
-    except Exception as e:
+    except (TaskTimeoutException, Exception) as e:
         # 异常兜底防护：严禁返回 HTTP 500 或带有非规范的顶层 error 字段
         # 严格按赛题一输出规范返回对应题型的合法兜底 Schema，保证返回结果与落盘文件合规
         logger.error(f"Solve endpoint caught unhandled exception for {task.case_id}: {e}", exc_info=True)

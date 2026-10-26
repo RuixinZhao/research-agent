@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     PAPERS_DIR: str = "/data/papers"
     EXPERIMENTS_DIR: str = "/data/experiments"
     
-    # 保护超时（平台总时限 180s，设置 175s 留足落盘与响应余量）
-    TASK_TIMEOUT_SECONDS: int = 175
+    # 保护超时（平台总时限 180s，设置 150s 留足落盘与响应余量）
+    TASK_TIMEOUT_SECONDS: int = 150
 
 
 settings = Settings()

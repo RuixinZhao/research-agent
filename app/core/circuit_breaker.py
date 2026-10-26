@@ -7,8 +7,8 @@ from typing import Callable, Any, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-class TaskTimeoutException(Exception):
-    """任务执行超时异常（通常由 150s 任务守护熔断器抛出）"""
+class TaskTimeoutException(BaseException):
+    """任务执行超时硬中断异常（继承 BaseException 防止被通用 except Exception 静默捕获）"""
     pass
 
 class CircuitBreakerOpenException(Exception):
