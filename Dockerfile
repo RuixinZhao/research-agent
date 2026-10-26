@@ -1,8 +1,7 @@
-# syntax=docker/dockerfile:1
 FROM agenthack/base:1.1.1
 
 LABEL maintainer="ResearchAgentTeam"
-LABEL version="1.2.5"
+LABEL version="1.2.6"
 
 USER root
 
@@ -18,6 +17,7 @@ COPY app /app/app
 COPY server.py /app/server.py
 COPY model_source.py /app/model_source.py
 COPY research-experiments-v1 /app/research-experiments-v1
+COPY research-experiments-20261020-source-v1-local /app/research-experiments-20261020-source-v1-local
 
 # 预创建各级产物目录并授予 agent 用户完全读写执行权限，严防沙箱写入 PermissionError
 RUN mkdir -p /output /app/data /app/data/expert /app/data/figure /app/data/work \
