@@ -30,3 +30,8 @@ downloaded_repositories/
 calibration/
 data/
 .env
+.env.*
+*.key
+*.pem
+secrets/
+credentials.json
